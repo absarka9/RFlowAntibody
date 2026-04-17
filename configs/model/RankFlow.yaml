@@ -13,7 +13,19 @@ scheduler:
   factor: 0.9
   patience: 10
 
+# Backbone model: 'esm2' | 'esm1v' | 'mint'
 model: esm2
+
+# MINT-specific: path to MINT checkpoint (only used when model='mint')
+mint_checkpoint_path: null
+
+# Structure encoder: 'esm-if1' | 'proteinmpnn'
+structure_encoder: esm-if1
+
+# ProteinMPNN-specific options (only used when structure_encoder='proteinmpnn')
+proteinmpnn_checkpoint_path: null
+proteinmpnn_hidden_dim: 128
+
 efm_beta: 1.0
 steps_ref: 20
 eta_ref: 0.02
