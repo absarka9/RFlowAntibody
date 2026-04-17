@@ -314,7 +314,6 @@ class RankFlow(LightningModule):
         y = []
         locations = set()
         for item in y_label:
-            # Support both (score, mutants, seq) and (score, mutants, seq, chain_ids) tuples
             score, mutants = item[0], item[1]
             y.append({
                 'score': score,
@@ -493,7 +492,10 @@ class RankFlow(LightningModule):
                 mask_idx = self.alphabet.mask_idx
 
                 # item['mutants']: list of tuples (pos1, wt33, mut33)
-                # pos1 is the token position in the full token sequence.
+                # pos1 is the 1-indexed token position in the full token sequence.
+                # For residue-aligned mode: convert to 0-indexed residue row by
+                # counting residue positions before pos1 in the mask.
+                # For legacy mode: residue row = pos1 - 1 (one CLS token offset).
                 mut_rows, wt20_list, mut20_list = [], [], []
                 for (pos1, wt33, mut33) in item['mutants']:
                     pos1 = int(pos1)

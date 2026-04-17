@@ -64,7 +64,7 @@ class MINTBackbone(nn.Module):
             # Strip leading 'model.' prefix as in mint/helpers/extract.py
             new_sd: Dict[str, torch.Tensor] = {}
             for k, v in raw_sd.items():
-                new_k = k[len("model."):] if k.startswith("model.") else k
+                new_k = k.removeprefix("model.")
                 new_sd[new_k] = v
             missing, unexpected = self._inner.load_state_dict(new_sd, strict=False)
             if missing:

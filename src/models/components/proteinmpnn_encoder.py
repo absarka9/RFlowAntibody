@@ -29,11 +29,12 @@ LOG = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _BACKBONE_ATOMS = ("N", "CA", "C", "O")
+_NAN_COORDS = np.full((4, 3), np.nan, dtype=np.float32)
 
 
 def _residue_coords(residue) -> np.ndarray:
     """Return (4, 3) backbone coordinates for a Bio.PDB residue; NaN for missing atoms."""
-    coords = np.full((4, 3), float("nan"), dtype=np.float32)
+    coords = _NAN_COORDS.copy()
     for i, atom_name in enumerate(_BACKBONE_ATOMS):
         if residue.has_id(atom_name):
             coords[i] = residue[atom_name].get_vector().get_array()
@@ -214,7 +215,7 @@ class ProteinMPNNEncoder(nn.Module):
 
         # --- initialise node features (zeros, as in ProteinMPNN forward) ---
         B, L, _ = E.shape[:3]
-        h_V = torch.zeros(B, L, self._model.hidden_dim, device=device)
+        h_V = torch.zeros(B, L, self.hidden_dim, device=device)
         h_E = self._model.W_e(E)
 
         # --- attention mask ---

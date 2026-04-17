@@ -158,10 +158,10 @@ def parse_antibody_mutant(
     parts = mutant_str.split(":")
     for part in parts:
         part = part.strip()
-        # Try "CH_LETTER + POSITION + MUT" e.g. "HA5G" or "H:A5G"
-        m = re.match(r"^([A-Za-z]):?([A-Z])(\d+)([A-Z])$", part)
+        # Try "CHAIN_LETTER + WT_AA + POSITION + MUT_AA" e.g. "HA5G" or "H:A5G"
+        m = re.match(r"^([A-Z]):?([A-Z])(\d+)([A-Z])$", part)
         if m:
-            ch_letter = m.group(1).upper()
+            ch_letter = m.group(1)
             wt_aa     = m.group(2)
             pos_in_ch = int(m.group(3))
             mut_aa    = m.group(4)
@@ -266,7 +266,7 @@ class AntibodyAffinityDataset(Dataset):
 
             # Encode the mutated multichain sequence
             mut_seq_str = row.get("mutated_sequence", None)
-            if mut_seq_str is not None and isinstance(mut_seq_str, str):
+            if mut_seq_str is not None:
                 # Rebuild chain_sequences with mutations applied
                 mut_chain_seqs = _apply_mutant_str_to_chains(
                     mutant_str, self.chain_seqs, self.chain_order
@@ -327,17 +327,19 @@ def _apply_mutant_str_to_chains(
     mut_seqs = {ch: list(chain_seqs[ch]) for ch in chain_order}
     for part in mutant_str.split(":"):
         part = part.strip()
-        m = re.match(r"^([A-Za-z]):?([A-Z])(\d+)([A-Z])$", part)
+        # Chain-prefixed format: "HA5G" or "H:A5G" (chain, wt, 1-based pos, mut)
+        m = re.match(r"^([A-Z]):?([A-Z])(\d+)([A-Z])$", part)
         if m:
-            ch    = m.group(1).upper()
-            pos   = int(m.group(3)) - 1  # 0-indexed
+            ch    = m.group(1)
+            pos   = int(m.group(3)) - 1  # convert 1-based to 0-indexed
             mut_aa = m.group(4)
         else:
+            # No chain prefix: "A5G" (wt, 1-based pos, mut); use first chain
             m2 = re.match(r"^([A-Z])(\d+)([A-Z])$", part)
             if m2 is None:
                 continue
             ch    = chain_order[0]
-            pos   = int(m2.group(2)) - 1
+            pos   = int(m2.group(2)) - 1  # convert 1-based to 0-indexed
             mut_aa = m2.group(3)
         if ch in mut_seqs and 0 <= pos < len(mut_seqs[ch]):
             mut_seqs[ch][pos] = mut_aa
