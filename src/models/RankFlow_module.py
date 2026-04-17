@@ -2,7 +2,7 @@ from __future__ import annotations
 import logging
 import numpy as np
 from scipy import stats
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import random
 import torch
 import math
@@ -113,6 +113,12 @@ class RankFlow(LightningModule):
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler,
         compile: bool,
+        # MINT backbone options
+        mint_checkpoint_path: Optional[str] = None,
+        # Structure encoder options
+        structure_encoder: str = "esm-if1",
+        proteinmpnn_checkpoint_path: Optional[str] = None,
+        proteinmpnn_hidden_dim: int = 128,
     ) -> None:
         super().__init__()
 
@@ -128,6 +134,13 @@ class RankFlow(LightningModule):
             self.model, self.alphabet = esm.pretrained.esm1v_t33_650M_UR90S_1()
             self.model.embed_dim = self.model.args.embed_dim
             self.model.attention_heads = self.model.args.attention_heads
+        elif model == 'mint':
+            from src.models.components.mint_backbone import MINTBackbone
+            self.model = MINTBackbone(
+                checkpoint_path=mint_checkpoint_path,
+                use_multimer=True,
+            )
+            self.alphabet = self.model.alphabet
 
         self.AA20 = "ACDEFGHIKLMNPQRSTVWY"
 
@@ -136,8 +149,26 @@ class RankFlow(LightningModule):
 
         self.idx33_to_aa20 = {int(self.canon_idx33[i]): i for i in range(20)}
 
+        # Whether to use residue-aligned (special-token-free) tensors throughout.
+        # True for MINT multichain; False for legacy ESM2/ESM1v single-chain.
+        self.use_residue_aligned: bool = (model == 'mint')
 
-        self.structure_model, self.structure_alphabet = esm.pretrained.esm_if1_gvp4_t16_142M_UR50()
+        # ----------------------------------------------------------------
+        # Structure encoder
+        # ----------------------------------------------------------------
+        if structure_encoder == 'proteinmpnn':
+            from src.models.components.proteinmpnn_encoder import ProteinMPNNEncoder
+            self.structure_model = ProteinMPNNEncoder(
+                checkpoint_path=proteinmpnn_checkpoint_path,
+                hidden_dim=proteinmpnn_hidden_dim,
+            )
+            d_struct = self.structure_model.hidden_dim
+            self.structure_encoder_type = 'proteinmpnn'
+        else:
+            self.structure_model, self.structure_alphabet = esm.pretrained.esm_if1_gvp4_t16_142M_UR50()
+            d_struct = self.structure_model.encoder.args.encoder_embed_dim
+            self.structure_encoder_type = 'esm-if1'
+
         self.model, self.structure_model = self.model.eval(), self.structure_model.eval()
         for name, param in self.model.named_parameters():
             param.requires_grad = False
@@ -155,7 +186,7 @@ class RankFlow(LightningModule):
         self.repr_dim = self.model.embed_dim
         self.repr_combine = nn.Parameter(torch.zeros(self.model.num_layers + 1))
         self.repr_mlp = nn.Sequential(LayerNorm(self.repr_dim), nn.Linear(self.repr_dim, self.repr_dim), nn.GELU(), nn.Linear(self.repr_dim, self.repr_dim))
-        self.structure_repr_mlp = nn.Sequential(LayerNorm(self.structure_model.encoder.args.encoder_embed_dim), nn.Linear(self.structure_model.encoder.args.encoder_embed_dim, self.repr_dim), nn.GELU(), nn.Linear(self.repr_dim, self.repr_dim))
+        self.structure_repr_mlp = nn.Sequential(LayerNorm(d_struct), nn.Linear(d_struct, self.repr_dim), nn.GELU(), nn.Linear(self.repr_dim, self.repr_dim))
         self.attn_dim = 32
         self.attn_num = self.model.num_layers * self.model.attention_heads
         self.attn_mlp = nn.Sequential(LayerNorm(self.attn_num), nn.Linear(self.attn_num, self.attn_num), nn.GELU(), nn.Linear(self.attn_num, self.attn_dim))
@@ -184,9 +215,88 @@ class RankFlow(LightningModule):
         self.assay_stats = {} 
         self.delta_mix_logit = nn.Parameter(torch.tensor(0.0))
 
+    def _encode_structure(self, coord) -> torch.Tensor:
+        """Encode structure using the active structure encoder.
+
+        For ProteinMPNN: coord is (X, mask, residue_idx, chain_encoding_all).
+        For ESM-IF1:     coord is (coord_tensor, padding_mask, confidence).
+
+        Returns:
+            structure_repr: (1, L, d_struct) detached tensor.
+        """
+        with torch.no_grad():
+            if self.structure_encoder_type == 'proteinmpnn':
+                X, mask, residue_idx, chain_encoding_all = coord
+                h_V = self.structure_model.encode(X, mask, residue_idx, chain_encoding_all)
+                return h_V.detach()  # (B, L, hidden_dim)
+            else:
+                # ESM-IF1: coord = (coord_tensor, padding_mask, confidence)
+                return (
+                    self.structure_model.encoder.forward(*coord)['encoder_out'][0]
+                    .detach()
+                    .transpose(0, 1)
+                )  # (B, L, encoder_dim)
+
     def _aa20_cols(self, device):
         self._ensure_vocab_buffers()
         return self.canon_idx33.to(device)
+
+    # ------------------------------------------------------------------
+    # Residue-alignment helpers (used with MINT multichain)
+    # ------------------------------------------------------------------
+
+    def _build_res_mask(self, tokens: torch.Tensor) -> torch.Tensor:
+        """Return a boolean mask (B, T) that is True at residue positions.
+
+        Special tokens (CLS, EOS, PAD) are False; all standard amino-acid
+        tokens are True.  Works for single-chain and multichain sequences.
+        """
+        cls_idx = getattr(self.alphabet, "cls_idx", None)
+        eos_idx = getattr(self.alphabet, "eos_idx", None)
+        pad_idx = getattr(self.alphabet, "padding_idx", None)
+        special = torch.zeros_like(tokens, dtype=torch.bool)
+        if cls_idx is not None:
+            special |= tokens == cls_idx
+        if eos_idx is not None:
+            special |= tokens == eos_idx
+        if pad_idx is not None:
+            special |= tokens == pad_idx
+        return ~special  # True = residue position
+
+    def _gather_res_1d(self, tensor: torch.Tensor, res_idx: torch.Tensor) -> torch.Tensor:
+        """Select positions in a (B, T, ...) tensor using 1-D residue indices.
+
+        Args:
+            tensor:  (B, T, ...)
+            res_idx: (L,) 1-D integer tensor of token positions to keep
+
+        Returns:
+            (B, L, ...)
+        """
+        expand_shape = (tensor.shape[0],) + (len(res_idx),) + tensor.shape[2:]
+        idx = res_idx.to(tensor.device)
+        # Expand idx to match all trailing dimensions
+        for _ in range(tensor.dim() - 2):
+            idx = idx.unsqueeze(-1)
+        idx = idx.unsqueeze(0).expand(expand_shape)
+        return tensor.gather(1, idx)
+
+    def _gather_res_attn(
+        self, attn: torch.Tensor, res_idx: torch.Tensor
+    ) -> torch.Tensor:
+        """Select residue positions on both token axes of attention (B, T, T, C).
+
+        Args:
+            attn:    (B, T, T, C)
+            res_idx: (L,) integer positions to keep
+
+        Returns:
+            (B, L, L, C)
+        """
+        idx = res_idx.to(attn.device)
+        attn = attn[:, idx, :, :]   # (B, L, T, C)
+        attn = attn[:, :, idx, :]   # (B, L, L, C)
+        return attn
 
     def _decode_logits20_from_embed(self, H):  # H: (K,d) or (1,K,d)
         if H.ndim == 2:
@@ -200,13 +310,13 @@ class RankFlow(LightningModule):
     def count_parameters(self, module: nn.Module):
         print(f"{sum(p.numel() for p in module.parameters() if p.requires_grad)/1e6:.2f}M")
     
-    def state_setup(self, masked_x_mt, y_label):
+    def state_setup(self, masked_x_mt, y_label, chain_ids=None):
         y = []
         locations = set()
-        for score, mutants, seq in y_label:
+        for item in y_label:
+            score, mutants = item[0], item[1]
             y.append({
                 'score': score,
-                'seq': seq,
                 'mutants': [(mutant[0], mutant[1], mutant[2]) for mutant in mutants]
             })
             for mutant in mutants:
@@ -214,18 +324,61 @@ class RankFlow(LightningModule):
 
         masked_batch_tokens = masked_x_mt.clone()
         with torch.no_grad():
-            result = self.model(masked_batch_tokens, repr_layers=range(self.model.num_layers+1), need_head_weights=True)
-        x = {'input': masked_x_mt, 
-            'logits': result['logits'].detach()[0], 
-            'representation': torch.stack([v.detach() for _, v in sorted(result['representations'].items())], dim=2), 
-            'attention': result['attentions'].detach().permute(0, 4, 3, 1, 2).flatten(3, 4)}
+            kwargs = {}
+            if self.use_residue_aligned and chain_ids is not None:
+                kwargs['chain_ids'] = chain_ids
+            result = self.model(
+                masked_batch_tokens,
+                repr_layers=range(self.model.num_layers + 1),
+                need_head_weights=True,
+                **kwargs,
+            )
+
+        # Stack representations: (B, T, num_layers+1, d)
+        rep_full = torch.stack(
+            [v.detach() for _, v in sorted(result['representations'].items())], dim=2
+        )
+        # Logits: (B, T, vocab) → take first batch item
+        logits_full = result['logits'].detach()[0]       # (T, vocab)
+        # Attentions: MINT returns (B, L, H, T, T); permute → (B, T, T, L*H)
+        attn_full = (
+            result['attentions']
+            .detach()
+            .permute(0, 4, 3, 1, 2)
+            .flatten(3, 4)
+        )  # (B, T, T, num_layers*heads)
+
+        if self.use_residue_aligned:
+            res_mask = self._build_res_mask(masked_batch_tokens)  # (B, T)
+            res_idx = res_mask[0].nonzero(as_tuple=True)[0]       # (L,)
+            rep_full   = self._gather_res_1d(rep_full, res_idx)    # (B, L, n_layers+1, d)
+            logits_full = logits_full[res_idx]                     # (L, vocab)
+            attn_full  = self._gather_res_attn(attn_full, res_idx) # (B, L, L, n_layers*heads)
+
+        x = {
+            'input': masked_x_mt,
+            'logits': logits_full,
+            'representation': rep_full,
+            'attention': attn_full,
+        }
+        if self.use_residue_aligned:
+            x['res_idx'] = res_idx  # store for downstream use
         return (x, y)
 
     def forward(self, x, structure_repr):
         representation, attention = x['representation'], x['attention'] 
 
-        residx = torch.arange(x['input'].shape[1], device=self.device).expand_as(x['input'])
-        mask = torch.ones_like(x['input'])
+        if self.use_residue_aligned:
+            # Representations and attention are already residue-aligned (no special tokens).
+            # residx is just 0..L-1; mask is all-ones.
+            L = representation.shape[1]
+            residx = torch.arange(L, device=self.device).unsqueeze(0).expand(
+                representation.shape[0], -1
+            )
+            mask = torch.ones(representation.shape[0], L, device=self.device)
+        else:
+            residx = torch.arange(x['input'].shape[1], device=self.device).expand_as(x['input'])
+            mask = torch.ones_like(x['input'])
 
         representation = self.repr_mlp((self.repr_combine.softmax(0).unsqueeze(0) @ representation).squeeze(2)) + self.structure_repr_mlp(structure_repr).repeat(representation.shape[0], 1, 1)
         attention = self.attn_mlp(attention)
@@ -240,13 +393,36 @@ class RankFlow(LightningModule):
         return representation
         
     @torch.no_grad()
-    def _get_rep_logits(self, tokens, *, repr_layer=33):
-        out = self.model(tokens, repr_layers=range(self.model.num_layers+1), need_head_weights=True)
-        # drop <cls>/<eos>
-        rep = torch.stack([v.detach() for _, v in sorted(out['representations'].items())], dim=2)  
-        logits33 = out["logits"][0, 1:-1, :]          
+    def _get_rep_logits(self, tokens, *, repr_layer=33, chain_ids=None):
+        kwargs = {}
+        if self.use_residue_aligned and chain_ids is not None:
+            kwargs['chain_ids'] = chain_ids
+        out = self.model(
+            tokens,
+            repr_layers=range(self.model.num_layers + 1),
+            need_head_weights=True,
+            **kwargs,
+        )
+
+        rep = torch.stack(
+            [v.detach() for _, v in sorted(out['representations'].items())], dim=2
+        )  # (B, T, num_layers+1, d)
+
+        # Attentions: MINT/ESM both return (B, num_layers, num_heads, T, T)
+        # Permute → (B, T, T, num_layers*heads)
         attn = out['attentions'].detach().permute(0, 4, 3, 1, 2).flatten(3, 4)
-        last_rep = out["representations"][repr_layer][0, 1:-1, :] 
+
+        if self.use_residue_aligned:
+            res_mask = self._build_res_mask(tokens)            # (B, T)
+            res_idx  = res_mask[0].nonzero(as_tuple=True)[0]  # (L,)
+            rep      = self._gather_res_1d(rep, res_idx)       # (B, L, n_layers+1, d)
+            logits33 = out["logits"].detach()[0][res_idx]       # (L, vocab)
+            attn     = self._gather_res_attn(attn, res_idx)    # (B, L, L, n*h)
+            last_rep = out["representations"][repr_layer].detach()[0][res_idx]  # (L, d)
+        else:
+            logits33 = out["logits"][0, 1:-1, :]               # (L, vocab)
+            attn     = attn                                     # (B, T, T, n*h)
+            last_rep = out["representations"][repr_layer][0, 1:-1, :]  # (L, d)
 
         return rep, logits33, attn, last_rep
     
@@ -280,8 +456,18 @@ class RankFlow(LightningModule):
 
         # Wild-type tokens
         wt_tokens_master = self.state[f"{name}-wt_tokens"].to(device)
-        Lp2 = wt_tokens_master.shape[1]  # L+2
-        L = Lp2 - 2
+
+        # Compute L (number of residues) correctly for single- and multi-chain.
+        if self.use_residue_aligned:
+            # res_idx was stored in state_setup; L = number of residue positions
+            res_mask_wt = self._build_res_mask(wt_tokens_master)
+            _res_idx_wt = res_mask_wt[0].nonzero(as_tuple=True)[0]
+            L = int(_res_idx_wt.shape[0])
+            chain_ids_master = self.state.get(f"{name}-chain_ids")
+        else:
+            Lp2 = wt_tokens_master.shape[1]  # L+2 for single-chain
+            L = Lp2 - 2
+            chain_ids_master = None
 
         # For rank loss accumulation over windows
         window_num_acc = torch.tensor(0.0, device=device)
@@ -305,12 +491,24 @@ class RankFlow(LightningModule):
                 tok = wt_tokens_master.clone()  
                 mask_idx = self.alphabet.mask_idx
 
-                # item['mutants']: list of tuples
+                # item['mutants']: list of tuples (pos1, wt33, mut33)
+                # pos1 is the 1-indexed token position in the full token sequence.
+                # For residue-aligned mode: convert to 0-indexed residue row by
+                # counting residue positions before pos1 in the mask.
+                # For legacy mode: residue row = pos1 - 1 (one CLS token offset).
                 mut_rows, wt20_list, mut20_list = [], [], []
                 for (pos1, wt33, mut33) in item['mutants']:
                     pos1 = int(pos1)
                     tok[0, pos1] = mask_idx
-                    mut_rows.append(pos1 - 1)  
+                    # For residue-aligned mode, compute the residue row from
+                    # the number of valid residue positions before pos1.
+                    if self.use_residue_aligned:
+                        res_mask_tok = self._build_res_mask(tok)
+                        # Count residues before this token position
+                        row = int(res_mask_tok[0, :pos1].sum().item())
+                    else:
+                        row = pos1 - 1
+                    mut_rows.append(row)
                     wt20_list.append(int(self.idx33_to_aa20[int(wt33)]))
                     mut20_list.append(int(self.idx33_to_aa20[int(mut33)]))
 
@@ -319,7 +517,10 @@ class RankFlow(LightningModule):
                     continue
 
                 # Get base reps / logits from the sequence model
-                rep_L0, logits33_L, attn, last_rep = self._get_rep_logits(tok)  
+                chain_ids_tok = chain_ids_master
+                rep_L0, logits33_L, attn, last_rep = self._get_rep_logits(
+                    tok, chain_ids=chain_ids_tok
+                )
 
                 aa20 = self._aa20_cols(device)
                 base_logits20 = logits33_L[:, aa20].index_select(0, rows)
@@ -329,7 +530,12 @@ class RankFlow(LightningModule):
                     {'input': tok, 'representation': rep_L0, 'attention': attn},
                     structure_repr=self.state[f'{name}-structure']
                 )
-                rep_L = rep_L[0, 1:-1, :]  # strip CLS/SEP
+                # For residue-aligned mode, forward() already returns residue-only
+                # (B, L, d); for legacy mode, strip CLS/EOS here.
+                if self.use_residue_aligned:
+                    rep_L = rep_L[0]        # (L, d)
+                else:
+                    rep_L = rep_L[0, 1:-1, :]  # strip CLS/SEP
                 rep_ctx = rep_L.unsqueeze(0)  
 
                 # Energy / weight
@@ -472,10 +678,13 @@ class RankFlow(LightningModule):
         self.val_spearman.reset()
         self.val_spearman_best.reset()
     
-    def seq_mean_acts(self, tokens, return_logits=False):
+    def seq_mean_acts(self, tokens, return_logits=False, chain_ids=None):
         with torch.no_grad():
             repr_layers=[32]
-            out = self.model(tokens, repr_layers=repr_layers)
+            kwargs = {}
+            if self.use_residue_aligned and chain_ids is not None:
+                kwargs['chain_ids'] = chain_ids
+            out = self.model(tokens, repr_layers=repr_layers, **kwargs)
             h = torch.stack([v.detach() for _, v in sorted(out['representations'].items())], dim=2)         
             logits = out['logits'].detach()[0]
         if return_logits == True:
@@ -483,13 +692,36 @@ class RankFlow(LightningModule):
 
         return h         
     
-    def seq_acts(self, tokens):
+    def seq_acts(self, tokens, chain_ids=None):
         with torch.no_grad():
-            result = self.model(tokens, repr_layers=range(self.model.num_layers+1), need_head_weights=True)
-        x = {'input': tokens, 
-            'logits': result['logits'].detach()[0], 
-            'representation': torch.stack([v.detach() for _, v in sorted(result['representations'].items())], dim=2), 
-            'attention': result['attentions'].detach().permute(0, 4, 3, 1, 2).flatten(3, 4)}
+            kwargs = {}
+            if self.use_residue_aligned and chain_ids is not None:
+                kwargs['chain_ids'] = chain_ids
+            result = self.model(
+                tokens,
+                repr_layers=range(self.model.num_layers + 1),
+                need_head_weights=True,
+                **kwargs,
+            )
+        # Attentions: (B, num_layers, num_heads, T, T) → (B, T, T, num_layers*heads)
+        attn = result['attentions'].detach().permute(0, 4, 3, 1, 2).flatten(3, 4)
+        if self.use_residue_aligned:
+            res_mask = self._build_res_mask(tokens)
+            res_idx  = res_mask[0].nonzero(as_tuple=True)[0]
+            rep = self._gather_res_1d(
+                torch.stack([v.detach() for _, v in sorted(result['representations'].items())], dim=2),
+                res_idx,
+            )
+            logits = result['logits'].detach()[0][res_idx]
+            attn = self._gather_res_attn(attn, res_idx)
+            x = {'input': tokens, 'logits': logits, 'representation': rep, 'attention': attn, 'res_idx': res_idx}
+        else:
+            x = {
+                'input': tokens,
+                'logits': result['logits'].detach()[0],
+                'representation': torch.stack([v.detach() for _, v in sorted(result['representations'].items())], dim=2),
+                'attention': attn,
+            }
         return x   
     
     def _ensure_vocab_buffers(self):
@@ -508,9 +740,14 @@ class RankFlow(LightningModule):
     def training_step(
         self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int
     ) -> torch.Tensor:
-        assay_names, batch_tokens, coords, train_labels, _, msa_bank, higher_mutseqs_100, lower_mutseqs_100 = batch 
+        # Batch may include chain_ids (multichain) or not (single-chain legacy).
+        if len(batch) == 9:
+            assay_names, batch_tokens, chain_ids_list, coords, train_labels, _, msa_bank, higher_mutseqs_100, lower_mutseqs_100 = batch
+        else:
+            assay_names, batch_tokens, coords, train_labels, _, msa_bank, higher_mutseqs_100, lower_mutseqs_100 = batch
+            chain_ids_list = [None] * len(assay_names)
 
-        for name, x_wt, coord, train_label in zip(assay_names, batch_tokens, coords, train_labels):
+        for name, x_wt, chain_ids, coord, train_label in zip(assay_names, batch_tokens, chain_ids_list, coords, train_labels):
             key = f'{name}-steer_v'
             if key not in self.state:
                 with torch.no_grad():
@@ -520,15 +757,17 @@ class RankFlow(LightningModule):
                 self.state[f"{name}-steer_v"] = steer_v.squeeze() 
             
             if f'{name}-train' not in self.state:
-                self.state[f'{name}-train'] = self.state_setup(x_wt, train_label)
+                self.state[f'{name}-train'] = self.state_setup(x_wt, train_label, chain_ids=chain_ids)
             if f'{name}-structure' not in self.state:
                 with torch.no_grad():
-                    self.state[f'{name}-structure'] = self.structure_model.encoder.forward(*coord)['encoder_out'][0].detach().transpose(0, 1)
+                    self.state[f'{name}-structure'] = self._encode_structure(coord)
             x, y = self.state[f'{name}-train']
 
             key_wt = f"{name}-wt_tokens"
             if key_wt not in self.state:
                 self.state[key_wt] = x_wt.clone().to(x_wt.device)
+            if chain_ids is not None:
+                self.state[f"{name}-chain_ids"] = chain_ids.clone().to(x_wt.device)
 
             if (name not in self.assay_stats) or (len(self.assay_stats[name]) < 3):
                 ys = torch.tensor([float(it["score"]) for it in y], device=x_wt.device)
@@ -543,21 +782,30 @@ class RankFlow(LightningModule):
         self.val_spearman.reset()
 
     def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> None:
-        assay_names, batch_tokens, coords, _, valid_labels, msa_bank, _,_ = batch
+        # Batch may include chain_ids (multichain) or not (single-chain legacy).
+        if len(batch) == 9:
+            assay_names, batch_tokens, chain_ids_list, coords, _, valid_labels, msa_bank, _, _ = batch
+        else:
+            assay_names, batch_tokens, coords, _, valid_labels, msa_bank, _, _ = batch
+            chain_ids_list = [None] * len(assay_names)
+
         device = batch_tokens[0].device
         self._ensure_vocab_buffers()
 
-        for name, x_wt, coord, valid_label in zip(assay_names, batch_tokens, coords, valid_labels):
+        for name, x_wt, chain_ids, coord, valid_label in zip(assay_names, batch_tokens, chain_ids_list, coords, valid_labels):
             if f'{name}-valid' not in self.state:
-                self.state[f'{name}-valid'] = self.state_setup(x_wt, valid_label)
+                self.state[f'{name}-valid'] = self.state_setup(x_wt, valid_label, chain_ids=chain_ids)
             if f'{name}-structure' not in self.state:
                 with torch.no_grad():
-                    self.state[f'{name}-structure'] = self.structure_model.encoder.forward(*coord)['encoder_out'][0].detach().transpose(0, 1)
+                    self.state[f'{name}-structure'] = self._encode_structure(coord)
             x, y = self.state[f'{name}-valid']
             key_wt = f"{name}-wt_tokens"
             if key_wt not in self.state:
                 self.state[key_wt] = x_wt.clone().to(device)
+            if chain_ids is not None:
+                self.state.setdefault(f"{name}-chain_ids", chain_ids.clone().to(device))
             wt_tokens_master = self.state[key_wt]
+            chain_ids_master = self.state.get(f"{name}-chain_ids")
             mu, sigma = self.assay_stats.get(name, (0.0, 1.0))
 
             scores_hat_all, scores_true_all = [], []
@@ -572,7 +820,12 @@ class RankFlow(LightningModule):
                 for (pos1, wt33, mut33) in mutants:
                     pos1 = int(pos1)
                     tok[0, pos1] = mask_idx
-                    rows_list.append(pos1 - 1)
+                    if self.use_residue_aligned:
+                        res_mask_tok = self._build_res_mask(tok)
+                        row = int(res_mask_tok[0, :pos1].sum().item())
+                    else:
+                        row = pos1 - 1
+                    rows_list.append(row)
                     wt20  = int(self.idx33_to_aa20[int(wt33)])
                     mut20 = int(self.idx33_to_aa20[int(mut33)])
                     wt20_list.append(wt20); mut20_list.append(mut20)
@@ -581,18 +834,28 @@ class RankFlow(LightningModule):
                 if rows.numel() == 0:
                     continue  
 
-                rep_L, logits33_L, attn, last_rep = self._get_rep_logits(tok)   
+                rep_L, logits33_L, attn, last_rep = self._get_rep_logits(
+                    tok, chain_ids=chain_ids_master
+                )
 
-                rep_L = self.forward({ 'input': tok, 'representation': rep_L, 
-                                    'attention': attn}, structure_repr=self.state[f'{name}-structure']).detach()
-                rep_L = rep_L[0, 1:-1, :]
+                rep_L = self.forward(
+                    {'input': tok, 'representation': rep_L, 'attention': attn},
+                    structure_repr=self.state[f'{name}-structure'],
+                ).detach()
+                if self.use_residue_aligned:
+                    rep_L = rep_L[0]        # (L, d)
+                else:
+                    rep_L = rep_L[0, 1:-1, :]
+
                 aa20 = self._aa20_cols(device)
                 base_logits20 = logits33_L[:, aa20].index_select(0, rows)  # (K,20)
                 x0_embed      = last_rep
                 K = x0_embed.size(0)
 
-
-                mut_rows = sorted({int(pos) - 1 for (pos, _wt, _mut) in mutants})
+                if self.use_residue_aligned:
+                    mut_rows = sorted({r for r in rows_list})
+                else:
+                    mut_rows = sorted({int(pos) - 1 for (pos, _wt, _mut) in mutants})
                 idx = torch.as_tensor(mut_rows, device=device, dtype=torch.long)
                 m = torch.zeros(K, 1, device=device, dtype=x0_embed.dtype)
                 m[idx] = 1.0
@@ -683,7 +946,7 @@ class RankFlow(LightningModule):
         return {"optimizer": optimizer}
     
     @torch.no_grad()
-    def _compute_assay_sign_like_validation(self, wt_tokens, y):
+    def _compute_assay_sign_like_validation(self, wt_tokens, y, chain_ids=None):
         self._ensure_vocab_buffers()
         device   = wt_tokens.device
         mask_idx = self.alphabet.mask_idx
@@ -694,14 +957,19 @@ class RankFlow(LightningModule):
             rows, wt20, mut20 = [], [], []
             for (pos1, wt33, mut33) in item['mutants']:     # pos1 is 1-based
                 p = int(pos1)
-                tok[0, p] = mask_idx                        # token index = pos1
-                rows.append(p - 1)                          # row index in (L,·)
+                tok[0, p] = mask_idx
+                if self.use_residue_aligned:
+                    res_mask_tok = self._build_res_mask(tok)
+                    row = int(res_mask_tok[0, :p].sum().item())
+                else:
+                    row = p - 1                             # row index in (L,·)
+                rows.append(row)
                 wt20.append(int(self.idx33_to_aa20[int(wt33)]))
                 mut20.append(int(self.idx33_to_aa20[int(mut33)]))
             if not rows: 
                 continue
 
-            _, logits33_L,_,_ = self._get_rep_logits(tok)   # (L,d), (L,33)
+            _, logits33_L, _, _ = self._get_rep_logits(tok, chain_ids=chain_ids)
             aa20 = self._aa20_cols(device)
             base_lp = F.log_softmax(logits33_L[:, aa20].index_select(
                 0, torch.tensor(rows, device=device)
