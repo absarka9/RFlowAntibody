@@ -95,6 +95,49 @@ python src/train.py data=antibody_library \
     data.chain_order="[H,A]"
 ```
 
+### Optional toggles: `use_wild_type_row` and `filter_modal_length`
+
+Two optional boolean flags let you control how the datamodule handles the
+`wild_type` and `modal_length` columns that may be present in your CSV.
+
+#### `use_wild_type_row` (default: `True`)
+
+When `True`, the datamodule looks for a row whose `wild_type` column equals
+`True` within each `library_id` group and uses that row's
+`heavy_sequence` / `light_sequence` / `antigen_sequence` values as the
+wildtype chain sequences for steering vectors and reference tokens.  If no
+such row exists the code falls back to extracting sequences from the PDB
+(original behaviour).
+
+Set to `False` to always derive wildtype sequences from the PDB.
+
+```yaml
+use_wild_type_row: True   # default – use CSV wild_type row when present
+```
+
+#### `filter_modal_length` (default: `False`)
+
+When `True`, each library's rows are pre-filtered to only those where
+`modal_length == True` before the train/validation split and label
+construction.  This is useful when you want to restrict training to
+variants whose CDR lengths match the most common (modal) length in the
+library, which can reduce noise from non-modal insertions/deletions.
+
+If the filter removes **all** rows from a library, that library is skipped
+with a warning rather than raising an error.
+
+```yaml
+filter_modal_length: True   # only use modal-length rows
+```
+
+Both flags can be combined:
+
+```bash
+python src/train.py data=antibody_library \
+    data.use_wild_type_row=True \
+    data.filter_modal_length=True
+```
+
 ## Contact
 Thank you for your interest in our work!
 

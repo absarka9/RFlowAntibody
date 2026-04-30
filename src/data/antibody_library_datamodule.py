@@ -267,6 +267,20 @@ class AntibodyLibraryData(LightningDataModule):
                            The column ``fold_{split_type}_5`` is looked up in
                            the CSV.  If absent, an 80/20 split is used.
         split_index:       Which fold to use as the validation set (0-4).
+        use_wild_type_row: When ``True`` (default), the row whose
+                           ``wild_type`` column equals ``True`` within each
+                           library group is used to supply the wildtype chain
+                           sequences (heavy/light/antigen) for steering
+                           vectors and reference tokens.  If no such row
+                           exists the code falls back to extracting sequences
+                           from the PDB.  When ``False`` the PDB is always
+                           used (original behaviour).
+        filter_modal_length: When ``True``, each library's rows are
+                           pre-filtered to only those where
+                           ``modal_length == True`` before splitting and
+                           building labels.  If filtering removes every row
+                           from a library, that library is skipped with a
+                           warning.  Defaults to ``False`` (no filtering).
         batch_size:        DataLoader batch size (always 1 per item; ignored
                            by the inner collation logic).
         num_workers:       DataLoader worker count.
@@ -281,6 +295,8 @@ class AntibodyLibraryData(LightningDataModule):
         chain_order: Optional[List[str]] = None,
         split_type: Optional[str] = None,
         split_index: int = 0,
+        use_wild_type_row: bool = True,
+        filter_modal_length: bool = False,
         batch_size: int = 1,
         num_workers: int = 0,
         pin_memory: bool = False,
@@ -342,6 +358,27 @@ class AntibodyLibraryData(LightningDataModule):
             lib_df = lib_df.reset_index(drop=True)
             lib_id_str = str(lib_id)
 
+            # ------------------------------------------------------------------
+            # Optional: filter to modal-length rows only
+            # ------------------------------------------------------------------
+            if hp.filter_modal_length:
+                _COL_MODAL = "modal_length"
+                if _COL_MODAL in lib_df.columns:
+                    filtered_df = lib_df[lib_df[_COL_MODAL] == True].reset_index(drop=True)  # noqa: E712
+                    if len(filtered_df) == 0:
+                        LOG.warning(
+                            "Library '%s': filter_modal_length removed all rows; skipping.",
+                            lib_id_str,
+                        )
+                        continue
+                    lib_df = filtered_df
+                else:
+                    LOG.warning(
+                        "Library '%s': filter_modal_length=True but column 'modal_length' "
+                        "not found; using all rows.",
+                        lib_id_str,
+                    )
+
             if lib_id_str not in pdb_map:
                 LOG.warning(
                     "library_id '%s' not found in library_pdb_map; skipping.", lib_id_str
@@ -366,16 +403,38 @@ class AntibodyLibraryData(LightningDataModule):
                 )
                 continue
 
-            # Wildtype sequences from PDB (used as reference / steering vectors)
-            try:
-                wt_chain_seqs = _extract_seqs_from_pdb(pdb_path, chain_order)
-            except Exception as exc:
-                LOG.warning(
-                    "_extract_seqs_from_pdb failed for library '%s': %s; "
-                    "falling back to empty wildtype sequences.",
-                    lib_id_str, exc,
-                )
-                wt_chain_seqs = {ch: "" for ch in chain_order}
+            # ------------------------------------------------------------------
+            # Wildtype chain sequences (used as reference / steering vectors)
+            # ------------------------------------------------------------------
+            wt_chain_seqs: Dict[str, str] = {}
+            if hp.use_wild_type_row:
+                _COL_WT = "wild_type"
+                if _COL_WT in lib_df.columns:
+                    wt_rows = lib_df[lib_df[_COL_WT] == True].reset_index(drop=True)  # noqa: E712
+                    if len(wt_rows) > 0:
+                        wt_chain_seqs = _row_chain_seqs(wt_rows.iloc[0], chain_order)
+                        LOG.debug(
+                            "Library '%s': wildtype sequences taken from CSV wild_type row.",
+                            lib_id_str,
+                        )
+                    else:
+                        LOG.warning(
+                            "Library '%s': use_wild_type_row=True but no wild_type==True "
+                            "row found; falling back to PDB sequences.",
+                            lib_id_str,
+                        )
+
+            if not wt_chain_seqs:
+                # Fall back to extracting sequences from the PDB
+                try:
+                    wt_chain_seqs = _extract_seqs_from_pdb(pdb_path, chain_order)
+                except Exception as exc:
+                    LOG.warning(
+                        "_extract_seqs_from_pdb failed for library '%s': %s; "
+                        "falling back to empty wildtype sequences.",
+                        lib_id_str, exc,
+                    )
+                    wt_chain_seqs = {ch: "" for ch in chain_order}
 
             # Wildtype multichain tokens (reference sequence)
             wt_tokens, wt_chain_ids = encode_multichain(wt_chain_seqs, chain_order, alphabet)
