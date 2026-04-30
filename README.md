@@ -35,6 +35,66 @@ We can train and test RankFlow as follows.
 
 The program will start training with the default settings. To modify any hyperparameters, edit `configs/model/RankFlow.yaml` or `configs/rankflow.yaml`. In the example provided, we train on the assay `SPG1_STRSG_Olson_2014`. If you want to train on a different assay, update the assay_index field in `configs/data/proteingym.yaml`.
 
+## Training with AntibodyLibraryData (master CSV + per-library PDBs)
+
+`AntibodyLibraryData` allows you to train RankFlow directly from a master CSV
+that groups antibody variants by library, without needing per-variant mutation
+strings.  Each library becomes one assay for RankFlow's list-wise ranking.
+
+### 1. Prepare the master CSV
+
+The CSV must contain at least the following columns (extra columns are ignored):
+
+| Column             | Description                                      |
+|--------------------|--------------------------------------------------|
+| `library_id`       | Groups rows into assays                          |
+| `heavy_sequence`   | VH (or VHH) amino-acid string; empty for Ag-only |
+| `light_sequence`   | VL amino-acid string; empty for nanobodies       |
+| `antigen_sequence` | Antigen amino-acid string; may be empty          |
+| `norm_affinity`    | Normalised affinity score (float, higher = better) |
+
+Optionally include a fold column (e.g. `fold_random_5`) for cross-validation.
+
+### 2. Prepare wildtype PDB structures
+
+For each `library_id`, provide a predicted (or experimental) wildtype complex
+PDB.  RankFlow reuses one structure per library for all its variants.
+
+Create a YAML (or JSON) mapping file, for example `library_pdb_map.yaml`:
+
+```yaml
+lib_001: /data/structures/lib_001_wt.pdb
+lib_002: /data/structures/lib_002_wt.pdb
+```
+
+### 3. Configure and run training
+
+Edit `configs/data/antibody_library.yaml`:
+
+```yaml
+data_dir: /path/to/your/data/
+master_csv: antibody_libraries.csv       # relative to data_dir, or absolute
+library_pdb_map: library_pdb_map.yaml   # relative to data_dir, or absolute
+chain_order: [H, L, A]                  # omit L for nanobody libraries
+split_type: random                      # uses fold_random_5 column if present
+split_index: 0
+```
+
+Then launch training with:
+
+```bash
+python src/train.py data=antibody_library
+```
+
+Or override parameters on the command line:
+
+```bash
+python src/train.py data=antibody_library \
+    data.master_csv=/abs/path/to/master.csv \
+    data.library_pdb_map=/abs/path/to/pdb_map.yaml \
+    data.chain_order="[H,A]"
+```
+
 ## Contact
 Thank you for your interest in our work!
 
