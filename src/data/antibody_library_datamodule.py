@@ -364,7 +364,7 @@ class AntibodyLibraryData(LightningDataModule):
             if hp.filter_modal_length:
                 _COL_MODAL = "modal_length"
                 if _COL_MODAL in lib_df.columns:
-                    filtered_df = lib_df[lib_df[_COL_MODAL] == True].reset_index(drop=True)  # noqa: E712
+                    filtered_df = lib_df[lib_df[_COL_MODAL]].reset_index(drop=True)
                     if len(filtered_df) == 0:
                         LOG.warning(
                             "Library '%s': filter_modal_length removed all rows; skipping.",
@@ -410,7 +410,7 @@ class AntibodyLibraryData(LightningDataModule):
             if hp.use_wild_type_row:
                 _COL_WT = "wild_type"
                 if _COL_WT in lib_df.columns:
-                    wt_rows = lib_df[lib_df[_COL_WT] == True].reset_index(drop=True)  # noqa: E712
+                    wt_rows = lib_df[lib_df[_COL_WT]].reset_index(drop=True)
                     if len(wt_rows) > 0:
                         wt_chain_seqs = _row_chain_seqs(wt_rows.iloc[0], chain_order)
                         LOG.debug(
