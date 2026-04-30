@@ -1,0 +1,35 @@
+_target_: src.data.antibody_library_datamodule.AntibodyLibraryData
+
+# Root directory that contains the master CSV and library_pdb_map file.
+# Relative paths in master_csv and library_pdb_map are resolved against data_dir.
+data_dir: /path/to/your/data/
+
+# Path to the master CSV (absolute, or relative to data_dir).
+# Required columns: library_id, heavy_sequence, light_sequence,
+#                   antigen_sequence, norm_affinity
+master_csv: antibody_libraries.csv
+
+# Path to a YAML or JSON file that maps library_id -> PDB path.
+# Example YAML:
+#   lib_001: /path/to/lib_001_wildtype.pdb
+#   lib_002: structure/lib_002.pdb
+library_pdb_map: library_pdb_map.yaml
+
+# Chain letters to encode and their order in the concatenated token sequence.
+# Supported values: H (heavy_sequence), L (light_sequence), A (antigen_sequence).
+# Omit L for nanobody / VHH libraries that have no light chain.
+chain_order:
+  - H
+  - L
+  - A
+
+# Cross-validation split settings.
+# If split_type is set, the column fold_{split_type}_5 is looked up in the CSV.
+# Set split_type to null to use an automatic 80/20 random split per library.
+split_type: null        # e.g. "random" to use fold_random_5 column
+split_index: 0          # fold index used as the validation set (0-4)
+
+# DataLoader settings
+batch_size: 1
+num_workers: 0
+pin_memory: False
