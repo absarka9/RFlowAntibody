@@ -58,7 +58,9 @@ Optionally include a fold column (e.g. `fold_random_5`) for cross-validation.
 ### 2. Prepare wildtype PDB structures
 
 For each `library_id`, provide a predicted (or experimental) wildtype complex
-PDB.  RankFlow reuses one structure per library for all its variants.
+structure.  RankFlow reuses one structure per library for all its variants.
+
+#### Option A – Manual map
 
 Create a YAML (or JSON) mapping file, for example `library_pdb_map.yaml`:
 
@@ -66,6 +68,40 @@ Create a YAML (or JSON) mapping file, for example `library_pdb_map.yaml`:
 lib_001: /data/structures/lib_001_wt.pdb
 lib_002: /data/structures/lib_002_wt.pdb
 ```
+
+#### Option B – Auto-generate from AlphaFold3 batch output
+
+If your structures were produced by AlphaFold3 and are organised as:
+
+```
+<base_dir>/
+    gpu_batch_1/<library_id>/<library_id>_model.cif
+    gpu_batch_2/<library_id>/<library_id>_model.cif
+    ...
+```
+
+use the bundled helper script to scan the directory tree and write the map
+automatically:
+
+```bash
+python scripts/generate_library_pdb_map.py \
+    --base-dir /pub/absara/datasets/ASD/af3/output \
+    --output   /path/to/library_pdb_map.yaml
+```
+
+If the same `library_id` appears in multiple `gpu_batch_*` directories the
+entry from the **lowest** batch number is used.
+
+Optionally restrict the output to only the libraries present in your master CSV:
+
+```bash
+python scripts/generate_library_pdb_map.py \
+    --base-dir   /pub/absara/datasets/ASD/af3/output \
+    --master-csv /path/to/master.csv \
+    --output     /path/to/library_pdb_map.yaml
+```
+
+Run `python scripts/generate_library_pdb_map.py --help` for all options.
 
 ### 3. Configure and run training
 
