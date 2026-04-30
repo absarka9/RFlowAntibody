@@ -23,19 +23,19 @@ actually used in training.
 
 Usage
 -----
-    python scripts/generate_library_pdb_map.py \\
-        --base-dir /pub/absara/datasets/ASD/af3/output \\
+    python scripts/generate_library_pdb_map.py \
+        --base-dir /pub/absara/datasets/ASD/af3/output \
         --output   /path/to/library_pdb_map.yaml
 
     # Restrict to libraries present in master CSV
-    python scripts/generate_library_pdb_map.py \\
-        --base-dir   /pub/absara/datasets/ASD/af3/output \\
-        --master-csv /path/to/master.csv \\
+    python scripts/generate_library_pdb_map.py \
+        --base-dir   /pub/absara/datasets/ASD/af3/output \
+        --master-csv /path/to/master.csv \
         --output     /path/to/library_pdb_map.yaml
 
     # Dry-run: print map to stdout without writing a file
-    python scripts/generate_library_pdb_map.py \\
-        --base-dir /pub/absara/datasets/ASD/af3/output \\
+    python scripts/generate_library_pdb_map.py \
+        --base-dir /pub/absara/datasets/ASD/af3/output \
         --dry-run
 """
 
