@@ -29,6 +29,19 @@ chain_order:
 split_type: null        # e.g. "random" to use fold_random_5 column
 split_index: 0          # fold index used as the validation set (0-4)
 
+# When True (default), the row with wild_type==True within each library_id
+# group is used to supply heavy/light/antigen wildtype sequences for steering
+# vectors and reference tokens.  If no wild_type row exists the code falls
+# back to extracting sequences from the PDB.
+# Set to False to always use PDB-derived sequences (original behaviour).
+use_wild_type_row: True
+
+# When True, each library's rows are pre-filtered to only those where
+# modal_length==True before splitting and building labels.  If filtering
+# removes all rows for a library that library is skipped with a warning.
+# Defaults to False (no filtering).
+filter_modal_length: False
+
 # DataLoader settings
 batch_size: 1
 num_workers: 0

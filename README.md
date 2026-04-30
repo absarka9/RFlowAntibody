@@ -58,7 +58,9 @@ Optionally include a fold column (e.g. `fold_random_5`) for cross-validation.
 ### 2. Prepare wildtype PDB structures
 
 For each `library_id`, provide a predicted (or experimental) wildtype complex
-PDB.  RankFlow reuses one structure per library for all its variants.
+structure.  RankFlow reuses one structure per library for all its variants.
+
+#### Option A – Manual map
 
 Create a YAML (or JSON) mapping file, for example `library_pdb_map.yaml`:
 
@@ -66,6 +68,40 @@ Create a YAML (or JSON) mapping file, for example `library_pdb_map.yaml`:
 lib_001: /data/structures/lib_001_wt.pdb
 lib_002: /data/structures/lib_002_wt.pdb
 ```
+
+#### Option B – Auto-generate from AlphaFold3 batch output
+
+If your structures were produced by AlphaFold3 and are organised as:
+
+```
+<base_dir>/
+    gpu_batch_1/<library_id>/<library_id>_model.cif
+    gpu_batch_2/<library_id>/<library_id>_model.cif
+    ...
+```
+
+use the bundled helper script to scan the directory tree and write the map
+automatically:
+
+```bash
+python scripts/generate_library_pdb_map.py \
+    --base-dir /pub/absara/datasets/ASD/af3/output \
+    --output   /path/to/library_pdb_map.yaml
+```
+
+If the same `library_id` appears in multiple `gpu_batch_*` directories the
+entry from the **lowest** batch number is used.
+
+Optionally restrict the output to only the libraries present in your master CSV:
+
+```bash
+python scripts/generate_library_pdb_map.py \
+    --base-dir   /pub/absara/datasets/ASD/af3/output \
+    --master-csv /path/to/master.csv \
+    --output     /path/to/library_pdb_map.yaml
+```
+
+Run `python scripts/generate_library_pdb_map.py --help` for all options.
 
 ### 3. Configure and run training
 
@@ -93,6 +129,49 @@ python src/train.py data=antibody_library \
     data.master_csv=/abs/path/to/master.csv \
     data.library_pdb_map=/abs/path/to/pdb_map.yaml \
     data.chain_order="[H,A]"
+```
+
+### Optional toggles: `use_wild_type_row` and `filter_modal_length`
+
+Two optional boolean flags let you control how the datamodule handles the
+`wild_type` and `modal_length` columns that may be present in your CSV.
+
+#### `use_wild_type_row` (default: `True`)
+
+When `True`, the datamodule looks for a row whose `wild_type` column equals
+`True` within each `library_id` group and uses that row's
+`heavy_sequence` / `light_sequence` / `antigen_sequence` values as the
+wildtype chain sequences for steering vectors and reference tokens.  If no
+such row exists the code falls back to extracting sequences from the PDB
+(original behaviour).
+
+Set to `False` to always derive wildtype sequences from the PDB.
+
+```yaml
+use_wild_type_row: True   # default – use CSV wild_type row when present
+```
+
+#### `filter_modal_length` (default: `False`)
+
+When `True`, each library's rows are pre-filtered to only those where
+`modal_length == True` before the train/validation split and label
+construction.  This is useful when you want to restrict training to
+variants whose CDR lengths match the most common (modal) length in the
+library, which can reduce noise from non-modal insertions/deletions.
+
+If the filter removes **all** rows from a library, that library is skipped
+with a warning rather than raising an error.
+
+```yaml
+filter_modal_length: True   # only use modal-length rows
+```
+
+Both flags can be combined:
+
+```bash
+python src/train.py data=antibody_library \
+    data.use_wild_type_row=True \
+    data.filter_modal_length=True
 ```
 
 ## Contact
