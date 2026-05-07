@@ -192,6 +192,19 @@ def _build_library_labels(
     return labels
 
 
+def _row_matches_chain_lengths(
+    row: pd.Series,
+    chain_order: List[str],
+    target_lengths: Dict[str, int],
+) -> bool:
+    """Return True if row chain-sequence lengths match target lengths."""
+    row_seqs = _row_chain_seqs(row, chain_order)
+    for ch in chain_order:
+        if len(row_seqs[ch]) != target_lengths[ch]:
+            return False
+    return True
+
+
 def _encode_seqs_as_tokens(
     df: pd.DataFrame,
     chain_order: List[str],
@@ -281,6 +294,12 @@ class AntibodyLibraryData(LightningDataModule):
                            building labels.  If filtering removes every row
                            from a library, that library is skipped with a
                            warning.  Defaults to ``False`` (no filtering).
+        filter_wild_type_length: When ``True``, each library's rows are
+                           pre-filtered to only those whose heavy/light/
+                           antigen sequence lengths match that library's
+                           resolved wildtype chain lengths.  If filtering
+                           removes every row from a library, that library is
+                           skipped with a warning.  Defaults to ``False``.
         batch_size:        DataLoader batch size (always 1 per item; ignored
                            by the inner collation logic).
         num_workers:       DataLoader worker count.
@@ -297,6 +316,7 @@ class AntibodyLibraryData(LightningDataModule):
         split_index: int = 0,
         use_wild_type_row: bool = True,
         filter_modal_length: bool = False,
+        filter_wild_type_length: bool = False,
         batch_size: int = 1,
         num_workers: int = 0,
         pin_memory: bool = False,
@@ -435,6 +455,24 @@ class AntibodyLibraryData(LightningDataModule):
                         lib_id_str, exc,
                     )
                     wt_chain_seqs = {ch: "" for ch in chain_order}
+
+            # Optional: keep only rows with chain lengths matching wildtype lengths
+            if hp.filter_wild_type_length:
+                wt_lengths = {ch: len(wt_chain_seqs[ch]) for ch in chain_order}
+                filtered_df = lib_df[
+                    lib_df.apply(
+                        _row_matches_chain_lengths,
+                        axis=1,
+                        args=(chain_order, wt_lengths),
+                    )
+                ].reset_index(drop=True)
+                if len(filtered_df) == 0:
+                    LOG.warning(
+                        "Library '%s': filter_wild_type_length removed all rows; skipping.",
+                        lib_id_str,
+                    )
+                    continue
+                lib_df = filtered_df
 
             # Wildtype multichain tokens (reference sequence)
             wt_tokens, wt_chain_ids = encode_multichain(wt_chain_seqs, chain_order, alphabet)
