@@ -1,0 +1,45 @@
+_wandb:
+    value:
+        cli_version: 0.26.1
+        e:
+            n75h7bknlxs4t1v501i7b5b1w3wt61ko:
+                codePath: scripts/wandb_test.py
+                codePathLocal: scripts/wandb_test.py
+                cpu_count: 48
+                cpu_count_logical: 48
+                disk:
+                    /:
+                        total: "935485612032"
+                        used: "174366842880"
+                email: absara@uci.edu
+                executable: /dfs6b/pub/absara/projects/antibodies/RFlowAntibody/.venv/bin/python
+                git:
+                    commit: c2c07c01683173e200626e990c4c73e1bead0f54
+                    remote: git@github.com:absarka9/RFlowAntibody.git
+                host: login-i16
+                memory:
+                    total: "269404225536"
+                os: Linux-5.14.0-611.36.1.el9_7.x86_64-x86_64-with-glibc2.34
+                program: /dfs6b/pub/absara/projects/antibodies/RFlowAntibody/scripts/wandb_test.py
+                python: CPython 3.10.18
+                root: /dfs6b/pub/absara/projects/antibodies/RFlowAntibody
+                startedAt: "2026-05-07T22:40:30.228639Z"
+                writerId: n75h7bknlxs4t1v501i7b5b1w3wt61ko
+        m: []
+        python_version: 3.10.18
+        t:
+            "3":
+                - 2
+                - 16
+            "4": 3.10.18
+            "5": 0.26.1
+            "12": 0.26.1
+            "13": linux-x86_64
+architecture:
+    value: CNN
+dataset:
+    value: CIFAR-100
+epochs:
+    value: 10
+learning_rate:
+    value: 0.02

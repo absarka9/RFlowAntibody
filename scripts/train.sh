@@ -3,7 +3,7 @@
 #SBATCH --output=/pub/absara/projects/antibodies/RFlowAntibody/logs/%A.out
 #SBATCH --error=/pub/absara/projects/antibodies/RFlowAntibody/logs/%A.err
 #SBATCH -A ABSARA_UROP_GPU
-#SBATCH --gres=gpu:A100:1
+#SBATCH --gres=gpu:A30:1
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8 
@@ -49,7 +49,7 @@ echo "Starting training..."
 python /pub/absara/projects/antibodies/RFlowAntibody/src/train.py \
   trainer.accelerator=gpu \
   trainer.devices=1 \
-  trainer.precision=32 \
+  trainer.precision=bf16-mixed \
   data=antibody_library \
   data.library_pdb_map="$YAML_MAP" \
   data.filter_modal_length=True

@@ -1,0 +1,28 @@
+{
+  "os":  "Linux-5.14.0-611.36.1.el9_7.x86_64-x86_64-with-glibc2.34",
+  "python":  "CPython 3.10.18",
+  "startedAt":  "2026-05-07T22:40:30.228639Z",
+  "program":  "/dfs6b/pub/absara/projects/antibodies/RFlowAntibody/scripts/wandb_test.py",
+  "codePath":  "scripts/wandb_test.py",
+  "codePathLocal":  "scripts/wandb_test.py",
+  "git":  {
+    "remote":  "git@github.com:absarka9/RFlowAntibody.git",
+    "commit":  "c2c07c01683173e200626e990c4c73e1bead0f54"
+  },
+  "email":  "absara@uci.edu",
+  "root":  "/dfs6b/pub/absara/projects/antibodies/RFlowAntibody",
+  "host":  "login-i16",
+  "executable":  "/dfs6b/pub/absara/projects/antibodies/RFlowAntibody/.venv/bin/python",
+  "cpu_count":  48,
+  "cpu_count_logical":  48,
+  "disk":  {
+    "/":  {
+      "total":  "935485612032",
+      "used":  "174366842880"
+    }
+  },
+  "memory":  {
+    "total":  "269404225536"
+  },
+  "writerId":  "n75h7bknlxs4t1v501i7b5b1w3wt61ko"
+}
