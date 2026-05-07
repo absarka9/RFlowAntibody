@@ -2,18 +2,18 @@ _target_: src.data.antibody_library_datamodule.AntibodyLibraryData
 
 # Root directory that contains the master CSV and library_pdb_map file.
 # Relative paths in master_csv and library_pdb_map are resolved against data_dir.
-data_dir: /path/to/your/data/
+data_dir: /pub/absara/datasets/ASD
 
 # Path to the master CSV (absolute, or relative to data_dir).
 # Required columns: library_id, heavy_sequence, light_sequence,
 #                   antigen_sequence, norm_affinity
-master_csv: antibody_libraries.csv
+master_csv: /pub/absara/datasets/ASD/csv/non_binary_affinity_unique/asd_full_align_norm.csv
 
 # Path to a YAML or JSON file that maps library_id -> PDB path.
 # Example YAML:
 #   lib_001: /path/to/lib_001_wildtype.pdb
 #   lib_002: structure/lib_002.pdb
-library_pdb_map: library_pdb_map.yaml
+library_pdb_map: /pub/absara/datasets/ASD/af3/af3_prediction_map.yaml
 
 # Chain letters to encode and their order in the concatenated token sequence.
 # Supported values: H (heavy_sequence), L (light_sequence), A (antigen_sequence).

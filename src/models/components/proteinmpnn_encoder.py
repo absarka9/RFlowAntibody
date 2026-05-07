@@ -106,7 +106,12 @@ def featurize_pdb(
     except ImportError as exc:
         raise ImportError("Biopython is required for featurize_pdb.") from exc
 
-    parser = PDB.PDBParser(QUIET=True)
+    pdb_path = str(pdb_path)
+    if pdb_path.endswith((".cif", ".mmcif")):
+        parser = PDB.MMCIFParser(QUIET=True)
+    else:
+        parser = PDB.PDBParser(QUIET=True)
+
     structure = parser.get_structure("protein", pdb_path)
     model = next(structure.get_models())
     chain_map = {ch.id: ch for ch in model.get_chains()}
@@ -162,6 +167,7 @@ class ProteinMPNNEncoder(nn.Module):
             ) from exc
 
         self._model = _PMPNN(
+            num_letters=21,
             node_features=hidden_dim,
             edge_features=hidden_dim,
             hidden_dim=hidden_dim,
@@ -193,38 +199,34 @@ class ProteinMPNNEncoder(nn.Module):
         residue_idx: torch.Tensor,
         chain_encoding_all: torch.Tensor,
     ) -> torch.Tensor:
-        """Run the ProteinMPNN encoder and return per-residue node features.
-
-        This replicates the encoder portion of ProteinMPNN.forward() without
-        running the decoder, following the standard ProteinMPNN architecture
-        in protein_mpnn_utils.py.
-
-        Args:
-            X:                  (B, L, 4, 3) backbone coordinates (N, CA, C, O)
-            mask:               (B, L)        1.0 for valid residues
-            residue_idx:        (B, L)        residue sequence numbers
-            chain_encoding_all: (B, L)        integer chain id (0-based)
-
-        Returns:
-            h_V: (B, L, hidden_dim) per-residue encoder features
-        """
+        
         device = X.device
 
         # --- build edge features and kNN graph ---
         E, E_idx = self._model.features(X, mask, residue_idx, chain_encoding_all)
 
-        # --- initialise node features (zeros, as in ProteinMPNN forward) ---
+        # Extract Batch and Sequence Length
         B, L, _ = E.shape[:3]
+        
+        # --- SAFEGUARD: Force mask to 2D to prevent validation broadcast bugs ---
+        mask = mask.reshape(B, L)
+
+        # --- initialise node features ---
         h_V = torch.zeros(B, L, self.hidden_dim, device=device)
         h_E = self._model.W_e(E)
 
+        # --- node mask ---
+        mask_V = mask.unsqueeze(-1)
+
         # --- attention mask ---
+        # Temporarily unsqueeze mask just for the attention calculation
         mask_attend = _gather_nodes(mask.unsqueeze(-1), E_idx).squeeze(-1)
         mask_attend = mask.unsqueeze(-1) * mask_attend
 
         # --- encoder layers ---
         for layer in self._model.encoder_layers:
-            h_V, h_E = layer(h_V, h_E, E_idx, mask_attend)
+            # Pass the 2D 'mask' directly; EncLayer handles unsqueezing internally
+            h_V, h_E = layer(h_V, h_E, E_idx, mask_V=mask, mask_attend=mask_attend)
 
         return h_V  # (B, L, hidden_dim)
 

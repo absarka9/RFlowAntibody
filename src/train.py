@@ -92,7 +92,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
 
 
-@hydra.main(version_base="1.0", config_path="../configs", config_name="rankflow.yaml")
+@hydra.main(version_base="1.1", config_path="../configs", config_name="rankflow.yaml")
 def main(cfg: DictConfig) -> Optional[float]:
     """Main entry point for training.
 

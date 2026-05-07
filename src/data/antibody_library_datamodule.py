@@ -330,7 +330,7 @@ class AntibodyLibraryData(LightningDataModule):
 
         # Load master CSV
         LOG.info("Loading master CSV from %s", csv_path)
-        master_df = pd.read_csv(csv_path)
+        master_df = pd.read_csv(csv_path, dtype={_COL_LIB: str})
         _require_columns(master_df, [_COL_LIB, _COL_SCORE])
 
         # Load library → PDB mapping

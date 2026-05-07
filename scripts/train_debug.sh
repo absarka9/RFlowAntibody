@@ -15,7 +15,10 @@ set -euo pipefail
 
 source /pub/absara/projects/antibodies/RFlowAntibody/.venv/bin/activate
 export PYTHONPATH=""
-export PYTHONPATH="/pub/absara/models/ProteinMPNN:$PYTHONPATH"
+export PYTHONPATH="/pub/absara/models/ProteinMPNN:${PYTHONPATH:-}"
+
+# (Optional) ensure GPU 0 is used
+export CUDA_VISIBLE_DEVICES=0
 
 # ---- AF3 archive staging ----
 ARCHIVE="/pub/absara/datasets/ASD/af3/af3_predictions.tar.zst"
@@ -41,14 +44,12 @@ python /pub/absara/projects/antibodies/RFlowAntibody/scripts/generate_library_pd
     --output "$YAML_MAP"
 # --------------------------------
 
-# 3. Run training
-# Note: You must pass the temporary YAML map path to your datamodule.
-# Ensure `data.library_pdb_map` matches the actual key in your Hydra config!
+# 3. Run training on GPU
 echo "Starting training..."
 python /pub/absara/projects/antibodies/RFlowAntibody/src/train.py \
-  debug=fdr \
-  trainer.accelerator=cpu \
+  trainer.accelerator=gpu \
   trainer.devices=1 \
   trainer.precision=32 \
   data=antibody_library \
-  data.library_pdb_map="$YAML_MAP"
+  data.library_pdb_map="$YAML_MAP" \
+  data.filter_modal_length=True

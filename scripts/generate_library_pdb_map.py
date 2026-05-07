@@ -37,6 +37,12 @@ Usage
     python scripts/generate_library_pdb_map.py \
         --base-dir /pub/absara/datasets/ASD/af3/output \
         --dry-run
+
+    # Rewrite map paths to a temp/scratch base
+    python scripts/generate_library_pdb_map.py \
+        --base-dir /pub/absara/datasets/ASD/af3/output \
+        --temp-base "$TMPDIR/structures" \
+        --output /path/to/library_pdb_map.yaml
 """
 
 from __future__ import annotations
@@ -189,6 +195,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--temp-base",
+        metavar="DIR",
+        default=None,
+        help=(
+            "Optional base directory used to rewrite output paths. "
+            "When set, paths in the YAML map are rewritten to "
+            "<temp-base>/<relative path under base-dir>."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the map to stdout instead of writing a file.",
@@ -208,6 +224,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
 
     base_dir = Path(args.base_dir).resolve()
+    temp_base = Path(args.temp_base).resolve() if args.temp_base else None
 
     allowed_ids: Optional[Set[str]] = None
     if args.master_csv:
@@ -228,6 +245,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             base_dir,
         )
         return 1
+
+    if temp_base is not None:
+        LOG.info("Rewriting paths using temp base: %s", temp_base)
+        rewritten: Dict[str, str] = {}
+        for lib_id, cif_path in mapping.items():
+            rel_path = Path(cif_path).relative_to(base_dir)
+            rewritten[lib_id] = str(temp_base / rel_path)
+        mapping = rewritten
 
     LOG.info("Found %d library → CIF mapping(s).", len(mapping))
 

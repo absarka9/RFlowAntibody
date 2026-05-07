@@ -14,16 +14,16 @@ scheduler:
   patience: 10
 
 # Backbone model: 'esm2' | 'esm1v' | 'mint'
-model: esm2
+model: mint
 
 # MINT-specific: path to MINT checkpoint (only used when model='mint')
-mint_checkpoint_path: null
+mint_checkpoint_path: /pub/absara/models/mint/mint.ckpt
 
 # Structure encoder: 'esm-if1' | 'proteinmpnn'
-structure_encoder: esm-if1
+structure_encoder: proteinmpnn
 
 # ProteinMPNN-specific options (only used when structure_encoder='proteinmpnn')
-proteinmpnn_checkpoint_path: null
+proteinmpnn_checkpoint_path: /pub/absara/models/ProteinMPNN/vanilla_model_weights/v_48_030.pt
 proteinmpnn_hidden_dim: 128
 
 efm_beta: 1.0

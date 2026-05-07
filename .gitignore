@@ -6,6 +6,10 @@ __pycache__/
 # C extensions
 *.so
 
+# SLURM logs
+*.err
+*.out
+
 # Distribution / packaging
 .Python
 build/
