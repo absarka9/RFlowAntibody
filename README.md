@@ -133,8 +133,8 @@ python src/train.py data=antibody_library \
 
 ### Optional toggles: `use_wild_type_row`, `filter_modal_length`, and `filter_wild_type_length`
 
-These optional boolean flags let you control how the datamodule handles the
-`wild_type` and `modal_length` columns and sequence-length filtering.
+These optional boolean flags let you control wildtype-source selection,
+modal-length column filtering, and wildtype-length sequence filtering.
 
 #### `use_wild_type_row` (default: `True`)
 
