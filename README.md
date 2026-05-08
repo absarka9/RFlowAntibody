@@ -131,10 +131,10 @@ python src/train.py data=antibody_library \
     data.chain_order="[H,A]"
 ```
 
-### Optional toggles: `use_wild_type_row`, `filter_modal_length`, and `filter_wild_type_length`
+### Optional toggles: `use_wild_type_row`, `filter_modal_length`, `filter_wild_type_length`, and `min_variants_per_library`
 
-These optional boolean flags let you control wildtype-source selection,
-modal-length column filtering, and wildtype-length sequence filtering.
+These optional flags let you control wildtype-source selection, modal-length
+column filtering, wildtype-length sequence filtering, and minimum library size.
 
 #### `use_wild_type_row` (default: `True`)
 
@@ -181,13 +181,26 @@ with a warning rather than raising an error.
 filter_wild_type_length: True   # only keep wildtype-length variants
 ```
 
+#### `min_variants_per_library` (default: `0`)
+
+Sets a per-library minimum retained-variant cutoff. After optional row-level
+filters (`filter_modal_length`, `filter_wild_type_length`) are applied, any
+library with fewer variants than this value is skipped.
+
+Set to `0` to disable.
+
+```yaml
+min_variants_per_library: 100   # skip libraries with <100 retained variants
+```
+
 All flags can be combined:
 
 ```bash
 python src/train.py data=antibody_library \
     data.use_wild_type_row=True \
     data.filter_modal_length=True \
-    data.filter_wild_type_length=True
+    data.filter_wild_type_length=True \
+    data.min_variants_per_library=100
 ```
 
 ## Contact

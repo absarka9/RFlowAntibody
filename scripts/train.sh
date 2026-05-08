@@ -19,6 +19,7 @@ export PYTHONPATH="/pub/absara/models/ProteinMPNN:${PYTHONPATH:-}"
 
 # (Optional) ensure GPU 0 is used
 export CUDA_VISIBLE_DEVICES=0
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # ---- AF3 archive staging ----
 ARCHIVE="/pub/absara/datasets/ASD/af3/af3_predictions.tar.zst"
@@ -51,5 +52,4 @@ python /pub/absara/projects/antibodies/RFlowAntibody/src/train.py \
   trainer.devices=1 \
   trainer.precision=bf16-mixed \
   data=antibody_library \
-  data.library_pdb_map="$YAML_MAP" \
-  data.filter_modal_length=True
+  data.library_pdb_map="$YAML_MAP"

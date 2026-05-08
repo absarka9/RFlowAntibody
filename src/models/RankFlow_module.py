@@ -445,7 +445,7 @@ class RankFlow(LightningModule):
         device = next(self.model.parameters()).device
 
         # Tune these two depending on GPU memory
-        chunk_size = 64          # smaller -> less memory per forward
+        chunk_size = 8          # smaller -> less memory per forward
         grad_acc_steps = 8       # number of items to accumulate before optimizer.step()
 
         # Global stats (for logging, not strictly needed for grad)

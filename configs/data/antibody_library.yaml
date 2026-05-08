@@ -47,7 +47,12 @@ filter_modal_length: False
 # chain lengths before splitting and building labels.  If filtering removes
 # all rows for a library that library is skipped with a warning.
 # Defaults to False (no filtering).
-filter_wild_type_length: False
+filter_wild_type_length: True
+
+# Minimum number of retained variants required for a library to be included.
+# Libraries with fewer rows than this cutoff are skipped with a warning.
+# Set to 0 to disable this filter.
+min_variants_per_library: 8
 
 # DataLoader settings
 batch_size: 1
