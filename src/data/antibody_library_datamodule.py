@@ -295,13 +295,17 @@ class AntibodyLibraryData(LightningDataModule):
                            from a library, that library is skipped with a
                            warning.  Defaults to ``False`` (no filtering).
         filter_wild_type_length: When ``True``, each library's rows are
-                           pre-filtered to only those whose heavy/light/
-                           antigen sequence lengths match that library's
-                           resolved wildtype chain lengths.  If filtering
-                           removes every row from a library, that library is
-                           skipped with a warning.  Defaults to ``False``.
+                            pre-filtered to only those whose heavy/light/
+                            antigen sequence lengths match that library's
+                            resolved wildtype chain lengths.  If filtering
+                            removes every row from a library, that library is
+                            skipped with a warning.  Defaults to ``False``.
+        min_variants_per_library: Minimum number of retained variants a
+                           library must have to be included.  Libraries with
+                           fewer rows than this cutoff are skipped with a
+                           warning.  Set to ``0`` (default) to disable.
         batch_size:        DataLoader batch size (always 1 per item; ignored
-                           by the inner collation logic).
+                            by the inner collation logic).
         num_workers:       DataLoader worker count.
         pin_memory:        Whether to pin DataLoader memory.
     """
@@ -317,6 +321,7 @@ class AntibodyLibraryData(LightningDataModule):
         use_wild_type_row: bool = True,
         filter_modal_length: bool = False,
         filter_wild_type_length: bool = False,
+        min_variants_per_library: int = 0,
         batch_size: int = 1,
         num_workers: int = 0,
         pin_memory: bool = False,
@@ -368,6 +373,7 @@ class AntibodyLibraryData(LightningDataModule):
             return str(candidate)
 
         alphabet = _get_mint_alphabet()
+        min_variants_cutoff = max(0, int(hp.min_variants_per_library))
 
         fold_col = f"fold_{hp.split_type}_5" if hp.split_type else None
 
@@ -473,6 +479,15 @@ class AntibodyLibraryData(LightningDataModule):
                     )
                     continue
                 lib_df = filtered_df
+
+            if min_variants_cutoff > 0 and len(lib_df) < min_variants_cutoff:
+                LOG.warning(
+                    "Library '%s': has %d variants after filtering, below min_variants_per_library=%d; skipping.",
+                    lib_id_str,
+                    len(lib_df),
+                    min_variants_cutoff,
+                )
+                continue
 
             # Wildtype multichain tokens (reference sequence)
             wt_tokens, wt_chain_ids = encode_multichain(wt_chain_seqs, chain_order, alphabet)
