@@ -3,12 +3,12 @@
 #SBATCH --output=/pub/absara/projects/antibodies/RFlowAntibody/logs/%A.out
 #SBATCH --error=/pub/absara/projects/antibodies/RFlowAntibody/logs/%A.err
 #SBATCH -A ABSARA_UROP_GPU
-#SBATCH --gres=gpu:A30:1
+#SBATCH --gres=gpu:A100:1
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8 
 #SBATCH --mem=64G
-#SBATCH --time=48:00:00
+#SBATCH --time=12:00:00
 #SBATCH --partition=gpu
 
 set -euo pipefail
