@@ -445,7 +445,7 @@ class RankFlow(LightningModule):
         device = next(self.model.parameters()).device
 
         # Tune these two depending on GPU memory
-        chunk_size = 2          # smaller -> less memory per forward
+        chunk_size = 64          # smaller -> less memory per forward
         grad_acc_steps = 8       # number of items to accumulate before optimizer.step()
 
         # Global stats (for logging, not strictly needed for grad)
@@ -913,6 +913,11 @@ class RankFlow(LightningModule):
    
             LOG.info(f'Testing assay {name}: spearman {spearman}')
             self.val_spearman(spearman)
+
+            if f'{name}-valid' in self.state:
+                del self.state[f'{name}-valid']
+
+            torch.cuda.empty_cache()
     
     def on_validation_epoch_end(self) -> None:
         "Lightning hook that is called when a validation epoch ends."

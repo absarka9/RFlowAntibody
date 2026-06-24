@@ -20,6 +20,8 @@ export PYTHONPATH="/pub/absara/models/ProteinMPNN:${PYTHONPATH:-}"
 # (Optional) ensure GPU 0 is used
 export CUDA_VISIBLE_DEVICES=0
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export WANDB_API_KEY="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"
+echo "Key length: ${WANDB_API_KEY}"
 
 # ---- AF3 archive staging ----
 ARCHIVE="/pub/absara/datasets/ASD/af3/af3_predictions.tar.zst"
