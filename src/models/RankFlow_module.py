@@ -26,13 +26,23 @@ def spearmanr(pred, target, **kw):
         pred = pred.unsqueeze(0)
     if target.ndim == 1:
         target = target.unsqueeze(0)
+        
     pred = soft_rank(pred, tau=0.5) 
     target = soft_rank(target, tau=0.5)
 
-    pred = pred - pred.mean(dim=1, keepdim=True)
-    pred = pred / (pred.std(dim=1, keepdim=True) + 1e-8)
-    target = target - target.mean(dim=1, keepdim=True)
-    target = target / (target.std(dim=1, keepdim=True) + 1e-8)
+    # 1. Safe standardization for predictions (Requires Gradients)
+    pred_mean = pred.mean(dim=1, keepdim=True)
+    # manual variance (unbiased=False)
+    pred_var = ((pred - pred_mean) ** 2).mean(dim=1, keepdim=True)
+    # epsilon goes INSIDE the square root to protect the backward pass!
+    pred_std = torch.sqrt(pred_var + 1e-8)
+    pred = (pred - pred_mean) / pred_std
+
+    # 2. Safe standardization for targets (No Gradients, but good practice)
+    target_mean = target.mean(dim=1, keepdim=True)
+    target_var = ((target - target_mean) ** 2).mean(dim=1, keepdim=True)
+    target_std = torch.sqrt(target_var + 1e-8)
+    target = (target - target_mean) / target_std
 
     return (pred * target).sum(dim=1).mean()
 
@@ -261,7 +271,8 @@ class RankFlow(LightningModule):
             special |= tokens == eos_idx
         if pad_idx is not None:
             special |= tokens == pad_idx
-        return ~special  # True = residue position
+            
+        return ~special  # True = physical residue position
 
     def _gather_res_1d(self, tensor: torch.Tensor, res_idx: torch.Tensor) -> torch.Tensor:
         """Select positions in a (B, T, ...) tensor using 1-D residue indices.
@@ -366,6 +377,9 @@ class RankFlow(LightningModule):
         return (x, y)
 
     def forward(self, x, structure_repr):
+        tok = x['input']
+        B, T = tok.shape
+                    
         representation, attention = x['representation'], x['attention'] 
 
         if self.use_residue_aligned:
@@ -413,6 +427,7 @@ class RankFlow(LightningModule):
         attn = out['attentions'].detach().permute(0, 4, 3, 1, 2).flatten(3, 4)
 
         if self.use_residue_aligned:
+            # Use the provided res_idx if available
             res_mask = self._build_res_mask(tokens)            # (B, T)
             res_idx  = res_mask[0].nonzero(as_tuple=True)[0]  # (L,)
             rep      = self._gather_res_1d(rep, res_idx)       # (B, L, n_layers+1, d)
@@ -443,10 +458,11 @@ class RankFlow(LightningModule):
     def loss_compute_and_backward(self, x, y, structure_repr, msa_bank, name=None):
         opt = self.optimizers()
         device = next(self.model.parameters()).device
+        LOG.info(f"DEBUG - Assay {name} | len(y): {len(y)}")
 
         # Tune these two depending on GPU memory
         chunk_size = 64          # smaller -> less memory per forward
-        grad_acc_steps = 8       # number of items to accumulate before optimizer.step()
+        grad_acc_steps = 2       # number of items to accumulate before optimizer.step()
 
         # Global stats (for logging, not strictly needed for grad)
         global_num_acc = torch.tensor(0.0, device=device)
@@ -488,32 +504,49 @@ class RankFlow(LightningModule):
 
             for index in range(len(chunk)):
                 item = chunk[index]
+
+            # --- DEBUG BLOCK ---
+                # if index == 0:
+                #     LOG.info(f"DEBUG - Mutants List: {item['mutants']}")
+                #     if len(item['mutants']) > 0:
+                #         sample_pos, sample_wt, sample_mut = item['mutants'][0]
+                #         w20_debug = int(self.idx33_to_aa20[int(sample_wt)])
+                #         m20_debug = int(self.idx33_to_aa20[int(sample_mut)])
+                #         LOG.info(f"DEBUG - WT33: {sample_wt} -> W20: {w20_debug}")
+                #         LOG.info(f"DEBUG - MUT33: {sample_mut} -> M20: {m20_debug}")
+            # -------------------
+                
                 tok = wt_tokens_master.clone()  
                 mask_idx = self.alphabet.mask_idx
 
-                # item['mutants']: list of tuples (pos1, wt33, mut33)
-                # pos1 is the 1-indexed token position in the full token sequence.
-                # For residue-aligned mode: convert to 0-indexed residue row by
-                # counting residue positions before pos1 in the mask.
-                # For legacy mode: residue row = pos1 - 1 (one CLS token offset).
-                mut_rows, wt20_list, mut20_list = [], [], []
+                # ---- Separate Token and Residue Rows ----
+                token_rows_list = []
+                residue_rows_list = []
+                wt20_list, mut20_list = [], []
+                
                 for (pos1, wt33, mut33) in item['mutants']:
                     pos1 = int(pos1)
                     tok[0, pos1] = mask_idx
-                    # For residue-aligned mode, compute the residue row from
-                    # the number of valid residue positions before pos1.
+                    
+                    # 1. Token-level index: where it lives in MINT output
+                    # In legacy mode, it's pos1 - 1. In residue_aligned, it matches the raw token array pos1.
                     if self.use_residue_aligned:
-                        res_mask_tok = self._build_res_mask(tok)
-                        # Count residues before this token position
-                        row = int(res_mask_tok[0, :pos1].sum().item())
+                        t_row = pos1 
+                        r_row = pos1
                     else:
-                        row = pos1 - 1
-                    mut_rows.append(row)
-                    wt20_list.append(int(self.idx33_to_aa20[int(wt33)]))
-                    mut20_list.append(int(self.idx33_to_aa20[int(mut33)]))
+                        t_row = pos1 - 1
+                        r_row = pos1 - 1
+                        
+                    token_rows_list.append(t_row)
+                    residue_rows_list.append(r_row)
+                    # Safely handle gaps/unknowns by defaulting to -1
+                    wt20_list.append(int(self.idx33_to_aa20.get(int(wt33), -1)))
+                    mut20_list.append(int(self.idx33_to_aa20.get(int(mut33), -1)))
 
-                rows = torch.tensor(mut_rows, device=device, dtype=torch.long)
-                if rows.numel() == 0:
+                t_rows = torch.tensor(token_rows_list, device=device, dtype=torch.long)
+                r_rows = torch.tensor(residue_rows_list, device=device, dtype=torch.long)
+                
+                if t_rows.numel() == 0:
                     continue
 
                 # Get base reps / logits from the sequence model
@@ -523,40 +556,49 @@ class RankFlow(LightningModule):
                 )
 
                 aa20 = self._aa20_cols(device)
-                base_logits20 = logits33_L[:, aa20].index_select(0, rows)
+                # FIX: Use token rows here
+                base_logits20 = logits33_L[:, aa20].index_select(0, t_rows)
 
                 # Contextual representation with structure
                 rep_L = self.forward(
                     {'input': tok, 'representation': rep_L0, 'attention': attn},
                     structure_repr=self.state[f'{name}-structure']
                 )
-                # For residue-aligned mode, forward() already returns residue-only
-                # (B, L, d); for legacy mode, strip CLS/EOS here.
+                
                 if self.use_residue_aligned:
-                    rep_L = rep_L[0]        # (L, d)
+                    rep_L = rep_L[0]
                 else:
-                    rep_L = rep_L[0, 1:-1, :]  # strip CLS/SEP
-                rep_ctx = rep_L.unsqueeze(0)  
+                    rep_L = rep_L[0, 1:-1, :]  # Legacy strip CLS/SEP
+                
+                rep_ctx = rep_L.unsqueeze(0)
 
                 # Energy / weight
+                # 1. Standardize the -log(Kd) score (mean 0, std 1)
                 y_score = torch.as_tensor(item['score'], device=device, dtype=torch.float32)
                 norm = (y_score - mu) / (sigma + 1e-8)
-                E = self.lambda_y * y_score + (1 - self.lambda_y) * ((y_score - mu) / (sigma + 1e-8))
-                w = torch.exp(self.efm_beta * (-E)).detach()  
+                
+                # 2. Since higher -log(Kd) is better, we want a POSITIVE correlation in the exponent.
+                # We drop the raw y_score (lambda_y) to prevent magnitude issues.
+                E = norm 
+                
+                # 3. Calculate weights (Note the REMOVAL of the negative sign before E)
+                # Clamp between -5 and 5 to prevent w from becoming exactly 0.0 or blowing up to infinity
+                E_clamped = torch.clamp(self.efm_beta * E, min=-5.0, max=5.0)
+                w = torch.exp(E_clamped).detach()
 
                 t = torch.rand(1, 1, device=device)
 
                 # Flow head inputs
                 x0_embed = last_rep  
                 m = torch.zeros(L, 1, device=device)
-                m[rows, 0] = 1.0
+                m[r_rows, 0] = 1.0
 
                 mut20 = torch.tensor(mut20_list, device=device, dtype=torch.long)
 
                 v_pred, z, x_in = self.emb_flow_head(
                     x0_embed, t, rep_ctx,
                     site_gate=m, add_noise=True,
-                    mutant_pos_list=rows.view(1, -1),
+                    mutant_pos_list=r_rows.view(1, -1),
                     mutant_aa_list=mut20.view(1, -1),
                 )
 
@@ -577,14 +619,14 @@ class RankFlow(LightningModule):
                     for _ in range(self.steps_ref):
                         v1, _, _ = self.emb_flow_head(
                             refined_H, t_fixed, rep_ctx,
-                            mutant_pos_list=rows.view(1, -1),
+                            mutant_pos_list=r_rows.view(1, -1),
                             mutant_aa_list=mut20.view(1, -1),
                             site_gate=m, add_noise=False
                         )
                         x_e = refined_H - self.eta_ref * v1
                         v2, _, _ = self.emb_flow_head(
                             x_e, t_fixed, rep_ctx,
-                            mutant_pos_list=rows.view(1, -1),
+                            mutant_pos_list=r_rows.view(1, -1),
                             mutant_aa_list=mut20.view(1, -1),
                             site_gate=m, add_noise=False
                         )
@@ -592,7 +634,8 @@ class RankFlow(LightningModule):
 
                 # Decode logits and compute advantage difference
                 ref_logits20 = self._decode_logits20_from_embed(refined_H)  # (L, 20)
-                ref_lp = F.log_softmax(ref_logits20.index_select(0, rows), dim=-1)
+                # FIX: Use residue rows here
+                ref_lp = F.log_softmax(ref_logits20.index_select(0, r_rows), dim=-1) 
                 base_lp = F.log_softmax(base_logits20, dim=-1)
 
                 base_vals, delta_vals = [], []
@@ -623,7 +666,7 @@ class RankFlow(LightningModule):
                     ef_loss = window_num_acc / (window_den_acc + 1e-8)
 
                     # Rank loss for this window
-                    if window_scores_hat:
+                    if len(window_scores_hat) >= 2:
                         scores_hat_batch = torch.stack(window_scores_hat, dim=0)      # (Nwin,)
                         scores_true_batch = torch.stack(window_scores_true, dim=0)    # (Nwin,)
                         loss_rank = 1.0 - spearmanr(scores_hat_batch, scores_true_batch)
@@ -653,7 +696,7 @@ class RankFlow(LightningModule):
         # Handle leftover items in the last window (if any)
         if window_den_acc.item() > 0:
             ef_loss = window_num_acc / (window_den_acc + 1e-8)
-            if window_scores_hat:
+            if len(window_scores_hat) >= 2:
                 scores_hat_batch = torch.stack(window_scores_hat, dim=0)
                 scores_true_batch = torch.stack(window_scores_true, dim=0)
                 loss_rank = 1.0 - spearmanr(scores_hat_batch, scores_true_batch)
@@ -799,6 +842,7 @@ class RankFlow(LightningModule):
                 with torch.no_grad():
                     self.state[f'{name}-structure'] = self._encode_structure(coord)
             x, y = self.state[f'{name}-valid']
+            res_idx_wt = x.get('res_idx', None) # Grab the invariant residue index
             key_wt = f"{name}-wt_tokens"
             if key_wt not in self.state:
                 self.state[key_wt] = x_wt.clone().to(device)
@@ -817,12 +861,12 @@ class RankFlow(LightningModule):
                 mask_idx = self.alphabet.mask_idx
 
                 rows_list, wt20_list, mut20_list = [], [], []
+                res_mask_wt = self._build_res_mask(wt_tokens_master) if self.use_residue_aligned else None
                 for (pos1, wt33, mut33) in mutants:
                     pos1 = int(pos1)
                     tok[0, pos1] = mask_idx
                     if self.use_residue_aligned:
-                        res_mask_tok = self._build_res_mask(tok)
-                        row = int(res_mask_tok[0, :pos1].sum().item())
+                        row = pos1
                     else:
                         row = pos1 - 1
                     rows_list.append(row)

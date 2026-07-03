@@ -52,6 +52,6 @@ echo "Starting training..."
 python /pub/absara/projects/antibodies/RFlowAntibody/src/train.py \
   trainer.accelerator=gpu \
   trainer.devices=1 \
-  trainer.precision=bf16-mixed \
+  trainer.precision=bf16 \
   data=antibody_library \
   data.library_pdb_map="$YAML_MAP"

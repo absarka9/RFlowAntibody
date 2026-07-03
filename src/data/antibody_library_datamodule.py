@@ -12,7 +12,7 @@ Expected CSV columns
                          antigen-only libraries
     light_sequence     – VL amino-acid string; may be empty/NaN for nanobodies
     antigen_sequence   – antigen amino-acid string; may be empty/NaN
-    norm_affinity      – normalised affinity score (float, higher = better)
+    processed_measurement      – -log(Kd) (float, higher = better)
 
 Any additional columns are silently ignored.
 
@@ -29,7 +29,7 @@ Batch tuple format (9-element, multichain) — same as AntibodyAffinityData
     lower_mutseqs_100      list[Tensor]        bottom-100 encoded sequences
 
 Label tuple format: (score, mutant_list, tokens, chain_ids)
-    score        – torch.float32 scalar (norm_affinity value)
+    score        – torch.float32 scalar (processed_measurement value)
     mutant_list  – [] (empty; no mutation strings are parsed)
     tokens       – (1, T) LongTensor of multichain tokens for this variant
     chain_ids    – (1, T) LongTensor of per-token chain indices
@@ -62,7 +62,7 @@ _COL_LIB  = "library_id"
 _COL_HEAVY = "heavy_sequence"
 _COL_LIGHT = "light_sequence"
 _COL_AG    = "antigen_sequence"
-_COL_SCORE = "norm_affinity"
+_COL_SCORE = "processed_measurement"
 
 # Chain-letter → CSV column mapping (must match chain_order convention)
 _CHAIN_COL: Dict[str, str] = {
@@ -164,7 +164,7 @@ def _row_chain_seqs(
         col = _CHAIN_COL.get(ch)
         if col is not None and col in row.index:
             val = row[col]
-            seqs[ch] = "" if (val is None or (isinstance(val, float) and np.isnan(val))) else str(val)
+            seqs[ch] = "" if (val is None or (isinstance(val, float) and np.isnan(val))) else str(val).replace("-", "")
         else:
             seqs[ch] = ""
     return seqs
@@ -174,12 +174,13 @@ def _build_library_labels(
     df: pd.DataFrame,
     chain_order: List[str],
     alphabet,
+    wt_tokens: torch.Tensor,
 ) -> List[Tuple]:
     """Build a label list for one library split (train or valid).
 
     Each entry is ``(score, mutant_list, tokens, chain_ids)`` where:
-        score       – torch.float32 scalar (norm_affinity)
-        mutant_list – [] (empty; sequences are provided directly)
+        score       – torch.float32 scalar (processed_measurement)
+        mutant_list – list of (pos_in_tensor, wt33_token, mut33_token)
         tokens      – (1, T) LongTensor
         chain_ids   – (1, T) LongTensor
     """
@@ -188,7 +189,24 @@ def _build_library_labels(
         score = torch.tensor(float(row[_COL_SCORE]), dtype=torch.float32)
         chain_seqs = _row_chain_seqs(row, chain_order)
         tokens, chain_ids = encode_multichain(chain_seqs, chain_order, alphabet)
-        labels.append((score, [], tokens, chain_ids))
+        
+        mutant_list = []
+        
+        # Extract substitutions by comparing variant tokens to wild-type tokens
+        if tokens.shape == wt_tokens.shape:
+            # Find indices where the tokens differ
+            diff_idx = torch.where(tokens[0] != wt_tokens[0])[0]
+            for idx in diff_idx:
+                pos1 = int(idx.item())
+                wt33 = int(wt_tokens[0, pos1].item())
+                mut33 = int(tokens[0, pos1].item())
+                mutant_list.append((pos1, wt33, mut33))
+        else:
+            # If lengths differ (insertion/deletion), mutant_list remains [].
+            # RankFlow only masks substitutions, so Indels will be safely skipped.
+            pass
+            
+        labels.append((score, mutant_list, tokens, chain_ids))
     return labels
 
 
@@ -358,6 +376,9 @@ class AntibodyLibraryData(LightningDataModule):
         master_df = pd.read_csv(csv_path, dtype={_COL_LIB: str})
         _require_columns(master_df, [_COL_LIB, _COL_SCORE])
 
+        # Drop any variants missing ground-truth binding scores
+        master_df = master_df.dropna(subset=[_COL_SCORE]).reset_index(drop=True)
+
         # Load library → PDB mapping
         pdb_map = _load_pdb_map(str(pdb_map_path))
 
@@ -481,12 +502,12 @@ class AntibodyLibraryData(LightningDataModule):
                 lib_df = filtered_df
 
             if min_variants_cutoff > 0 and len(lib_df) < min_variants_cutoff:
-                LOG.warning(
-                    "Library '%s': has %d variants after filtering, below min_variants_per_library=%d; skipping.",
-                    lib_id_str,
-                    len(lib_df),
-                    min_variants_cutoff,
-                )
+                # LOG.warning(
+                #     "Library '%s': has %d variants after filtering, below min_variants_per_library=%d; skipping.",
+                #     lib_id_str,
+                #     len(lib_df),
+                #     min_variants_cutoff,
+                # )
                 continue
 
             # Wildtype multichain tokens (reference sequence)
@@ -502,8 +523,8 @@ class AntibodyLibraryData(LightningDataModule):
                 continue
 
             # Build labels
-            train_labels = _build_library_labels(train_df, chain_order, alphabet)
-            valid_labels = _build_library_labels(valid_df, chain_order, alphabet) if len(valid_df) else []
+            train_labels = _build_library_labels(train_df, chain_order, alphabet, wt_tokens)
+            valid_labels = _build_library_labels(valid_df, chain_order, alphabet, wt_tokens) if len(valid_df) else []
 
             # Top/bottom 100 encoded sequences for steering vectors
             sorted_df = lib_df.sort_values(_COL_SCORE, ascending=False).reset_index(drop=True)
