@@ -461,8 +461,8 @@ class RankFlow(LightningModule):
         LOG.info(f"DEBUG - Assay {name} | len(y): {len(y)}")
 
         # Tune these two depending on GPU memory
-        chunk_size = 64          # smaller -> less memory per forward
-        grad_acc_steps = 2       # number of items to accumulate before optimizer.step()
+        chunk_size = 1          # smaller -> less memory per forward
+        grad_acc_steps = 4       # number of items to accumulate before optimizer.step()
 
         # Global stats (for logging, not strictly needed for grad)
         global_num_acc = torch.tensor(0.0, device=device)
