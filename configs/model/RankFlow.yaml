@@ -20,7 +20,7 @@ model: mint
 mint_checkpoint_path: /pub/absara/models/mint/mint.ckpt
 
 # Structure encoder: 'esm-if1' | 'proteinmpnn'
-structure_encoder: proteinmpnn
+structure_encoder: esm-if1
 
 # ProteinMPNN-specific options (only used when structure_encoder='proteinmpnn')
 proteinmpnn_checkpoint_path: /pub/absara/models/ProteinMPNN/vanilla_model_weights/v_48_030.pt

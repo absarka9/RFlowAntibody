@@ -10,7 +10,6 @@ from math import atanh
 import esm
 from lightning import LightningModule
 from torchmetrics import MaxMetric, MeanMetric, PearsonCorrCoef
-#import torchsort
 from torch.nn import functional as F
 from dataclasses import dataclass
 from src.models.unet_1d import Unet1D
@@ -18,7 +17,6 @@ from src.models.unet_1d import Unet1D
 def soft_rank(x, tau=1.0):
     diff = x.unsqueeze(-1) - x.unsqueeze(-2) 
     P = torch.sigmoid(-diff / tau)
-
     return 1 + P.sum(dim=-1)
 
 def spearmanr(pred, target, **kw):
@@ -32,9 +30,7 @@ def spearmanr(pred, target, **kw):
 
     # 1. Safe standardization for predictions (Requires Gradients)
     pred_mean = pred.mean(dim=1, keepdim=True)
-    # manual variance (unbiased=False)
     pred_var = ((pred - pred_mean) ** 2).mean(dim=1, keepdim=True)
-    # epsilon goes INSIDE the square root to protect the backward pass!
     pred_std = torch.sqrt(pred_var + 1e-8)
     pred = (pred - pred_mean) / pred_std
 
@@ -49,10 +45,8 @@ def spearmanr(pred, target, **kw):
 LOG = logging.getLogger(__name__)
 
 from src.models.components.modules import TriangularSelfAttentionBlock
-
 from torch import nn
 from torch.nn import LayerNorm
-
 
 class EmbFlowHead(nn.Module):
     """v_theta on embedding space: input/output (B, K, d_model)."""
@@ -70,13 +64,11 @@ class EmbFlowHead(nn.Module):
         self.net = Unet1D(dim=128, channels=chan_in, out_dim=rep_dim,
                           dim_mults=(1,2), dropout=0.1, fitness_pos=False)
         
-
     def forward(self, x0_embed, t, rep_ctx,
                 mutant_pos_list, mutant_aa_list,
                 add_noise: bool = True,
                 site_gate=None,
                 ):
-        # x0_embed: (B,K,d), rep_ctx: (B,L,d) or (B,K,d) (we'll broadcast mean if needed)
         if x0_embed.ndim == 2: x0_embed = x0_embed[None, ...]
         if rep_ctx.ndim == 2: rep_ctx = rep_ctx[None, ...]
         B, K, d = x0_embed.shape
@@ -88,25 +80,21 @@ class EmbFlowHead(nn.Module):
         cond = x0_embed.new_zeros(B, K, e.size(-1))
         cond.scatter_add_(1, idx0.unsqueeze(-1).expand_as(e), e) 
 
-        # build context per site (broadcast a global mean)
         rep_c = self.rep_ln(self.rep_proj(rep_ctx))
-
         x_in = self.x_ln(x0_embed)
-        if add_noise:
-            std   = t.to(x_in.device).view(B,1,1)   # σ(t)=t
-            alpha = 1.0 - t                         # μ(t)=1−t
-            z     = torch.randn_like(x_in)
-            x_t  = x_in * alpha + z * std          # VP path
 
-            #x_cat = torch.cat([x_t, rep_c], dim=-1) 
+        if add_noise:
+            std   = t.to(x_in.device).view(B,1,1)   
+            alpha = 1.0 - t                         
+            z     = torch.randn_like(x_in)
+            x_t  = x_in * alpha + z * std          
             x_cat = torch.cat([x_t, rep_c, cond], dim=-1)
         else:
             z = None
-            #x_cat = torch.cat([x_in, rep_c], dim=-1) 
             x_cat = torch.cat([x_in, rep_c, cond], dim=-1)
    
-        v     = self.net(x_cat.permute(0,2,1), t.view(B)).permute(0,2,1)  # (B,K,d)
-        if site_gate is not None:                   # (B,K,1)
+        v     = self.net(x_cat.permute(0,2,1), t.view(B)).permute(0,2,1)  
+        if site_gate is not None:                   
             if site_gate.ndim == 2: site_gate = site_gate[None, ...]
             v = v * site_gate
         return v.squeeze(0), (z.squeeze(0) if z is not None else None), x_in.squeeze(0)
@@ -123,9 +111,7 @@ class RankFlow(LightningModule):
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler,
         compile: bool,
-        # MINT backbone options
         mint_checkpoint_path: Optional[str] = None,
-        # Structure encoder options
         structure_encoder: str = "esm-if1",
         proteinmpnn_checkpoint_path: Optional[str] = None,
         proteinmpnn_hidden_dim: int = 128,
@@ -138,6 +124,7 @@ class RankFlow(LightningModule):
         self.eta_ref      = eta_ref
         self.t0_ref       = t0_ref
         self.lambda_y     = lambda_y
+        
         if model == 'esm2':
             self.model, self.alphabet = esm.pretrained.esm2_t33_650M_UR50D()
         elif model == 'esm1v':
@@ -153,14 +140,10 @@ class RankFlow(LightningModule):
             self.alphabet = self.model.alphabet
 
         self.AA20 = "ACDEFGHIKLMNPQRSTVWY"
-
         canon_idx33 = [self.alphabet.get_idx(a) for a in self.AA20]  
         self.canon_idx33 = torch.tensor(canon_idx33, dtype=torch.long)
-
         self.idx33_to_aa20 = {int(self.canon_idx33[i]): i for i in range(20)}
 
-        # Whether to use residue-aligned (special-token-free) tensors throughout.
-        # True for MINT multichain; False for legacy ESM2/ESM1v single-chain.
         self.use_residue_aligned: bool = (model == 'mint')
 
         # ----------------------------------------------------------------
@@ -197,20 +180,21 @@ class RankFlow(LightningModule):
         self.repr_combine = nn.Parameter(torch.zeros(self.model.num_layers + 1))
         self.repr_mlp = nn.Sequential(LayerNorm(self.repr_dim), nn.Linear(self.repr_dim, self.repr_dim), nn.GELU(), nn.Linear(self.repr_dim, self.repr_dim))
         self.structure_repr_mlp = nn.Sequential(LayerNorm(d_struct), nn.Linear(d_struct, self.repr_dim), nn.GELU(), nn.Linear(self.repr_dim, self.repr_dim))
-        self.attn_dim = 32
-        self.attn_num = self.model.num_layers * self.model.attention_heads
-        self.attn_mlp = nn.Sequential(LayerNorm(self.attn_num), nn.Linear(self.attn_num, self.attn_num), nn.GELU(), nn.Linear(self.attn_num, self.attn_dim))
+        
+        # Sequence to Pairwise Dimension Mapping
+        self.pairwise_dim = 32
+        self.sequence_to_pair = nn.Linear(self.repr_dim, self.pairwise_dim)
 
         self.count_parameters(self.repr_mlp)
         self.count_parameters(self.structure_repr_mlp)
-        self.count_parameters(self.attn_mlp)
+        self.count_parameters(self.sequence_to_pair)
 
         self.num_blocks = 1
         self.blocks = nn.ModuleList(
             [
                 TriangularSelfAttentionBlock(
                     sequence_state_dim=self.repr_dim,
-                    pairwise_state_dim=self.attn_dim,
+                    pairwise_state_dim=self.pairwise_dim,
                     sequence_head_width=32,
                     pairwise_head_width=32,
                     dropout=0.2
@@ -226,41 +210,37 @@ class RankFlow(LightningModule):
         self.delta_mix_logit = nn.Parameter(torch.tensor(0.0))
 
     def _encode_structure(self, coord) -> torch.Tensor:
-        """Encode structure using the active structure encoder.
-
-        For ProteinMPNN: coord is (X, mask, residue_idx, chain_encoding_all).
-        For ESM-IF1:     coord is (coord_tensor, padding_mask, confidence).
-
-        Returns:
-            structure_repr: (1, L, d_struct) detached tensor.
-        """
         with torch.no_grad():
             if self.structure_encoder_type == 'proteinmpnn':
                 X, mask, residue_idx, chain_encoding_all = coord
                 h_V = self.structure_model.encode(X, mask, residue_idx, chain_encoding_all)
-                return h_V.detach()  # (B, L, hidden_dim)
+                return h_V.detach()  
             else:
-                # ESM-IF1: coord = (coord_tensor, padding_mask, confidence)
+                # 1. Extract exactly what ESM-IF1 needs
+                coords = coord[0]
+                
+                # INVERT THE MASK HERE: ~coord[1].bool()
+                encoder_padding_mask = ~coord[1].bool() if coord[1] is not None else None
+                
+                # Check if confidence scores are provided (usually index 2 if they exist)
+                confidence = coord[2] if len(coord) > 2 and coord[2] is not None else None
+                
+                # 2. Pass them as explicit keyword arguments
                 return (
-                    self.structure_model.encoder.forward(*coord)['encoder_out'][0]
+                    self.structure_model.encoder.forward(
+                        coords=coords, 
+                        encoder_padding_mask=encoder_padding_mask, 
+                        confidence=confidence
+                    )['encoder_out'][0]
                     .detach()
                     .transpose(0, 1)
-                )  # (B, L, encoder_dim)
+                ) 
 
     def _aa20_cols(self, device):
         self._ensure_vocab_buffers()
         return self.canon_idx33.to(device)
 
-    # ------------------------------------------------------------------
-    # Residue-alignment helpers (used with MINT multichain)
-    # ------------------------------------------------------------------
-
     def _build_res_mask(self, tokens: torch.Tensor) -> torch.Tensor:
-        """Return a boolean mask (B, T) that is True at residue positions.
-
-        Special tokens (CLS, EOS, PAD) are False; all standard amino-acid
-        tokens are True.  Works for single-chain and multichain sequences.
-        """
         cls_idx = getattr(self.alphabet, "cls_idx", None)
         eos_idx = getattr(self.alphabet, "eos_idx", None)
         pad_idx = getattr(self.alphabet, "padding_idx", None)
@@ -272,50 +252,22 @@ class RankFlow(LightningModule):
         if pad_idx is not None:
             special |= tokens == pad_idx
             
-        return ~special  # True = physical residue position
+        return ~special  
 
     def _gather_res_1d(self, tensor: torch.Tensor, res_idx: torch.Tensor) -> torch.Tensor:
-        """Select positions in a (B, T, ...) tensor using 1-D residue indices.
-
-        Args:
-            tensor:  (B, T, ...)
-            res_idx: (L,) 1-D integer tensor of token positions to keep
-
-        Returns:
-            (B, L, ...)
-        """
         expand_shape = (tensor.shape[0],) + (len(res_idx),) + tensor.shape[2:]
         idx = res_idx.to(tensor.device)
-        # Expand idx to match all trailing dimensions
         for _ in range(tensor.dim() - 2):
             idx = idx.unsqueeze(-1)
         idx = idx.unsqueeze(0).expand(expand_shape)
         return tensor.gather(1, idx)
 
-    def _gather_res_attn(
-        self, attn: torch.Tensor, res_idx: torch.Tensor
-    ) -> torch.Tensor:
-        """Select residue positions on both token axes of attention (B, T, T, C).
-
-        Args:
-            attn:    (B, T, T, C)
-            res_idx: (L,) integer positions to keep
-
-        Returns:
-            (B, L, L, C)
-        """
-        idx = res_idx.to(attn.device)
-        attn = attn[:, idx, :, :]   # (B, L, T, C)
-        attn = attn[:, :, idx, :]   # (B, L, L, C)
-        return attn
-
-    def _decode_logits20_from_embed(self, H):  # H: (K,d) or (1,K,d)
+    def _decode_logits20_from_embed(self, H): 
         if H.ndim == 2:
             H = H.unsqueeze(0)
-        # ESM has a final norm before the LM head; use it if present
         ln = getattr(self.model, "emb_layer_norm_after", None) or getattr(self.model, "layer_norm", None)
         Hn = ln(H) if ln is not None else H
-        logits33 = self.model.lm_head(Hn)              # (1,K,33)
+        logits33 = self.model.lm_head(Hn)              
         return logits33[0, :, self._aa20_cols(H.device)] 
     
     def count_parameters(self, module: nn.Module):
@@ -341,50 +293,37 @@ class RankFlow(LightningModule):
             result = self.model(
                 masked_batch_tokens,
                 repr_layers=range(self.model.num_layers + 1),
-                need_head_weights=True,
+                need_head_weights=False,
                 **kwargs,
             )
 
-        # Stack representations: (B, T, num_layers+1, d)
         rep_full = torch.stack(
             [v.detach() for _, v in sorted(result['representations'].items())], dim=2
         )
-        # Logits: (B, T, vocab) → take first batch item
-        logits_full = result['logits'].detach()[0]       # (T, vocab)
-        # Attentions: MINT returns (B, L, H, T, T); permute → (B, T, T, L*H)
-        attn_full = (
-            result['attentions']
-            .detach()
-            .permute(0, 4, 3, 1, 2)
-            .flatten(3, 4)
-        )  # (B, T, T, num_layers*heads)
+        logits_full = result['logits'].detach()[0]       
 
         if self.use_residue_aligned:
-            res_mask = self._build_res_mask(masked_batch_tokens)  # (B, T)
-            res_idx = res_mask[0].nonzero(as_tuple=True)[0]       # (L,)
-            rep_full   = self._gather_res_1d(rep_full, res_idx)    # (B, L, n_layers+1, d)
-            logits_full = logits_full[res_idx]                     # (L, vocab)
-            attn_full  = self._gather_res_attn(attn_full, res_idx) # (B, L, L, n_layers*heads)
+            res_mask = self._build_res_mask(masked_batch_tokens)  
+            res_idx = res_mask[0].nonzero(as_tuple=True)[0]       
+            rep_full   = self._gather_res_1d(rep_full, res_idx)    
+            logits_full = logits_full[res_idx]                     
 
         x = {
             'input': masked_x_mt,
             'logits': logits_full,
             'representation': rep_full,
-            'attention': attn_full,
         }
         if self.use_residue_aligned:
-            x['res_idx'] = res_idx  # store for downstream use
+            x['res_idx'] = res_idx  
         return (x, y)
 
     def forward(self, x, structure_repr):
         tok = x['input']
         B, T = tok.shape
                     
-        representation, attention = x['representation'], x['attention'] 
+        representation = x['representation'] 
 
         if self.use_residue_aligned:
-            # Representations and attention are already residue-aligned (no special tokens).
-            # residx is just 0..L-1; mask is all-ones.
             L = representation.shape[1]
             residx = torch.arange(L, device=self.device).unsqueeze(0).expand(
                 representation.shape[0], -1
@@ -395,14 +334,17 @@ class RankFlow(LightningModule):
             mask = torch.ones_like(x['input'])
 
         representation = self.repr_mlp((self.repr_combine.softmax(0).unsqueeze(0) @ representation).squeeze(2)) + self.structure_repr_mlp(structure_repr).repeat(representation.shape[0], 1, 1)
-        attention = self.attn_mlp(attention)
+        
+        # 1D Sequence to 2D Pairwise mapping
+        s_proj = self.sequence_to_pair(representation)
+        z = s_proj.unsqueeze(1) + s_proj.unsqueeze(2)
 
         def trunk_iter(s, z, residx, mask):
             for block in self.blocks:
                 s, z = block(s, z, mask=mask, residue_index=residx, chunk_size=None)
             return s, z
         
-        representation, _ = trunk_iter(representation, attention, residx, mask)
+        representation, _ = trunk_iter(representation, z, residx, mask)
 
         return representation
         
@@ -414,32 +356,25 @@ class RankFlow(LightningModule):
         out = self.model(
             tokens,
             repr_layers=range(self.model.num_layers + 1),
-            need_head_weights=True,
+            need_head_weights=False,
             **kwargs,
         )
 
         rep = torch.stack(
             [v.detach() for _, v in sorted(out['representations'].items())], dim=2
-        )  # (B, T, num_layers+1, d)
-
-        # Attentions: MINT/ESM both return (B, num_layers, num_heads, T, T)
-        # Permute → (B, T, T, num_layers*heads)
-        attn = out['attentions'].detach().permute(0, 4, 3, 1, 2).flatten(3, 4)
+        )  
 
         if self.use_residue_aligned:
-            # Use the provided res_idx if available
-            res_mask = self._build_res_mask(tokens)            # (B, T)
-            res_idx  = res_mask[0].nonzero(as_tuple=True)[0]  # (L,)
-            rep      = self._gather_res_1d(rep, res_idx)       # (B, L, n_layers+1, d)
-            logits33 = out["logits"].detach()[0][res_idx]       # (L, vocab)
-            attn     = self._gather_res_attn(attn, res_idx)    # (B, L, L, n*h)
-            last_rep = out["representations"][repr_layer].detach()[0][res_idx]  # (L, d)
+            res_mask = self._build_res_mask(tokens)            
+            res_idx  = res_mask[0].nonzero(as_tuple=True)[0]  
+            rep      = self._gather_res_1d(rep, res_idx)       
+            logits33 = out["logits"].detach()[0][res_idx]       
+            last_rep = out["representations"][repr_layer].detach()[0][res_idx]  
         else:
-            logits33 = out["logits"][0, 1:-1, :]               # (L, vocab)
-            attn     = attn                                     # (B, T, T, n*h)
-            last_rep = out["representations"][repr_layer][0, 1:-1, :]  # (L, d)
+            logits33 = out["logits"][0, 1:-1, :]               
+            last_rep = out["representations"][repr_layer][0, 1:-1, :]  
 
-        return rep, logits33, attn, last_rep
+        return rep, logits33, last_rep
     
     def _make_aa_feat(self, L, mutants, device):
         aa_feat = torch.zeros(1, L, 16, device=device)
@@ -454,45 +389,37 @@ class RankFlow(LightningModule):
         aa_feat[0, rows, :] = self.emb_flow_head.aa_emb(aa)
         return aa_feat
 
-
     def loss_compute_and_backward(self, x, y, structure_repr, msa_bank, name=None):
         opt = self.optimizers()
         device = next(self.model.parameters()).device
         LOG.info(f"DEBUG - Assay {name} | len(y): {len(y)}")
 
-        # Tune these two depending on GPU memory
-        chunk_size = 1          # smaller -> less memory per forward
-        grad_acc_steps = 4       # number of items to accumulate before optimizer.step()
+        chunk_size = 1          
+        grad_acc_steps = 8       
 
-        # Global stats (for logging, not strictly needed for grad)
         global_num_acc = torch.tensor(0.0, device=device)
         global_den_acc = torch.tensor(0.0, device=device)
 
         mu, sigma = self.assay_stats[name]
 
-        # Wild-type tokens
         wt_tokens_master = self.state[f"{name}-wt_tokens"].to(device)
 
-        # Compute L (number of residues) correctly for single- and multi-chain.
         if self.use_residue_aligned:
-            # res_idx was stored in state_setup; L = number of residue positions
             res_mask_wt = self._build_res_mask(wt_tokens_master)
             _res_idx_wt = res_mask_wt[0].nonzero(as_tuple=True)[0]
             L = int(_res_idx_wt.shape[0])
             chain_ids_master = self.state.get(f"{name}-chain_ids")
         else:
-            Lp2 = wt_tokens_master.shape[1]  # L+2 for single-chain
+            Lp2 = wt_tokens_master.shape[1]  
             L = Lp2 - 2
             chain_ids_master = None
 
-        # For rank loss accumulation over windows
         window_num_acc = torch.tensor(0.0, device=device)
         window_den_acc = torch.tensor(0.0, device=device)
         window_scores_hat = []
         window_scores_true = []
         window_count = 0
 
-        # Ensure we start with clean grads
         opt.zero_grad(set_to_none=True)
 
         num_chunks = (len(y) + chunk_size - 1) // chunk_size
@@ -504,22 +431,10 @@ class RankFlow(LightningModule):
 
             for index in range(len(chunk)):
                 item = chunk[index]
-
-            # --- DEBUG BLOCK ---
-                # if index == 0:
-                #     LOG.info(f"DEBUG - Mutants List: {item['mutants']}")
-                #     if len(item['mutants']) > 0:
-                #         sample_pos, sample_wt, sample_mut = item['mutants'][0]
-                #         w20_debug = int(self.idx33_to_aa20[int(sample_wt)])
-                #         m20_debug = int(self.idx33_to_aa20[int(sample_mut)])
-                #         LOG.info(f"DEBUG - WT33: {sample_wt} -> W20: {w20_debug}")
-                #         LOG.info(f"DEBUG - MUT33: {sample_mut} -> M20: {m20_debug}")
-            # -------------------
                 
                 tok = wt_tokens_master.clone()  
                 mask_idx = self.alphabet.mask_idx
 
-                # ---- Separate Token and Residue Rows ----
                 token_rows_list = []
                 residue_rows_list = []
                 wt20_list, mut20_list = [], []
@@ -528,8 +443,6 @@ class RankFlow(LightningModule):
                     pos1 = int(pos1)
                     tok[0, pos1] = mask_idx
                     
-                    # 1. Token-level index: where it lives in MINT output
-                    # In legacy mode, it's pos1 - 1. In residue_aligned, it matches the raw token array pos1.
                     if self.use_residue_aligned:
                         t_row = pos1 
                         r_row = pos1
@@ -539,7 +452,6 @@ class RankFlow(LightningModule):
                         
                     token_rows_list.append(t_row)
                     residue_rows_list.append(r_row)
-                    # Safely handle gaps/unknowns by defaulting to -1
                     wt20_list.append(int(self.idx33_to_aa20.get(int(wt33), -1)))
                     mut20_list.append(int(self.idx33_to_aa20.get(int(mut33), -1)))
 
@@ -549,46 +461,36 @@ class RankFlow(LightningModule):
                 if t_rows.numel() == 0:
                     continue
 
-                # Get base reps / logits from the sequence model
                 chain_ids_tok = chain_ids_master
-                rep_L0, logits33_L, attn, last_rep = self._get_rep_logits(
+                rep_L0, logits33_L, last_rep = self._get_rep_logits(
                     tok, chain_ids=chain_ids_tok
                 )
 
                 aa20 = self._aa20_cols(device)
-                # FIX: Use token rows here
                 base_logits20 = logits33_L[:, aa20].index_select(0, t_rows)
 
-                # Contextual representation with structure
                 rep_L = self.forward(
-                    {'input': tok, 'representation': rep_L0, 'attention': attn},
+                    {'input': tok, 'representation': rep_L0},
                     structure_repr=self.state[f'{name}-structure']
                 )
                 
                 if self.use_residue_aligned:
                     rep_L = rep_L[0]
                 else:
-                    rep_L = rep_L[0, 1:-1, :]  # Legacy strip CLS/SEP
+                    rep_L = rep_L[0, 1:-1, :]  
                 
                 rep_ctx = rep_L.unsqueeze(0)
 
-                # Energy / weight
-                # 1. Standardize the -log(Kd) score (mean 0, std 1)
                 y_score = torch.as_tensor(item['score'], device=device, dtype=torch.float32)
                 norm = (y_score - mu) / (sigma + 1e-8)
                 
-                # 2. Since higher -log(Kd) is better, we want a POSITIVE correlation in the exponent.
-                # We drop the raw y_score (lambda_y) to prevent magnitude issues.
                 E = norm 
                 
-                # 3. Calculate weights (Note the REMOVAL of the negative sign before E)
-                # Clamp between -5 and 5 to prevent w from becoming exactly 0.0 or blowing up to infinity
                 E_clamped = torch.clamp(self.efm_beta * E, min=-5.0, max=5.0)
                 w = torch.exp(E_clamped).detach()
 
                 t = torch.rand(1, 1, device=device)
 
-                # Flow head inputs
                 x0_embed = last_rep  
                 m = torch.zeros(L, 1, device=device)
                 m[r_rows, 0] = 1.0
@@ -602,17 +504,14 @@ class RankFlow(LightningModule):
                     mutant_aa_list=mut20.view(1, -1),
                 )
 
-                # EFM (flow) loss 
                 loss_i = (v_pred - (z - x_in)).pow(2).mean(dim=-1).mean() 
 
-                # Accumulate EF loss (global stats + window stats)
                 global_num_acc = global_num_acc + w * loss_i.detach()
                 global_den_acc = global_den_acc + w
 
                 window_num_acc = window_num_acc + w * loss_i
                 window_den_acc = window_den_acc + w
 
-                # Refinement steps (from x0)
                 refined_H = x0_embed.clone()
                 if self.steps_ref > 0:
                     t_fixed = torch.tensor([[self.t0_ref]], device=device)
@@ -632,9 +531,7 @@ class RankFlow(LightningModule):
                         )
                         refined_H = refined_H - 0.5 * self.eta_ref * (v1 + v2)
 
-                # Decode logits and compute advantage difference
-                ref_logits20 = self._decode_logits20_from_embed(refined_H)  # (L, 20)
-                # FIX: Use residue rows here
+                ref_logits20 = self._decode_logits20_from_embed(refined_H)  
                 ref_lp = F.log_softmax(ref_logits20.index_select(0, r_rows), dim=-1) 
                 base_lp = F.log_softmax(base_logits20, dim=-1)
 
@@ -652,48 +549,38 @@ class RankFlow(LightningModule):
                 base_score = torch.stack(base_vals).mean()
                 delta_score = torch.stack(delta_vals).mean()
                 gamma = torch.sigmoid(self.delta_mix_logit)
-                pred_score = base_score + gamma * delta_score  # scalar tensor
+                pred_score = base_score + gamma * delta_score  
 
-                # prediction/target for rank loss
-                window_scores_hat.append(pred_score)         # keep as tensor (no float())
-                window_scores_true.append(norm)                    # also tensor
+                window_scores_hat.append(pred_score)         
+                window_scores_true.append(norm)                    
 
                 window_count += 1
 
-                # ---- Gradient accumulation window ----
                 if window_count % grad_acc_steps == 0:
-                    # EFM loss for this window
                     ef_loss = window_num_acc / (window_den_acc + 1e-8)
 
-                    # Rank loss for this window
                     if len(window_scores_hat) >= 2:
-                        scores_hat_batch = torch.stack(window_scores_hat, dim=0)      # (Nwin,)
-                        scores_true_batch = torch.stack(window_scores_true, dim=0)    # (Nwin,)
+                        scores_hat_batch = torch.stack(window_scores_hat, dim=0)      
+                        scores_true_batch = torch.stack(window_scores_true, dim=0)    
                         loss_rank = 1.0 - spearmanr(scores_hat_batch, scores_true_batch)
                     else:
                         loss_rank = torch.tensor(0.0, device=device)
 
                     total_loss = 1.0 * ef_loss + 0.5 * loss_rank
 
-                    # Backward with normalized loss to keep scale stable
                     (total_loss / 1.0).backward()
 
                     opt.step()
                     opt.zero_grad(set_to_none=True)
 
-                    # Reset window accumulators
                     window_num_acc = torch.tensor(0.0, device=device)
                     window_den_acc = torch.tensor(0.0, device=device)
                     window_scores_hat = []
                     window_scores_true = []
 
-                    # Optional: free some references (not strictly needed)
                     del ef_loss, loss_rank, total_loss
 
-            # end for index in chunk
-        # end for chunk_idx in range(num_chunks)
 
-        # Handle leftover items in the last window (if any)
         if window_den_acc.item() > 0:
             ef_loss = window_num_acc / (window_den_acc + 1e-8)
             if len(window_scores_hat) >= 2:
@@ -708,7 +595,6 @@ class RankFlow(LightningModule):
             opt.step()
             opt.zero_grad(set_to_none=True)
 
-        # You can return global stats if you want to log them
         final_loss = global_num_acc / (global_den_acc + 1e-8)
         return final_loss, None
 
@@ -743,11 +629,9 @@ class RankFlow(LightningModule):
             result = self.model(
                 tokens,
                 repr_layers=range(self.model.num_layers + 1),
-                need_head_weights=True,
+                need_head_weights=False,
                 **kwargs,
             )
-        # Attentions: (B, num_layers, num_heads, T, T) → (B, T, T, num_layers*heads)
-        attn = result['attentions'].detach().permute(0, 4, 3, 1, 2).flatten(3, 4)
         if self.use_residue_aligned:
             res_mask = self._build_res_mask(tokens)
             res_idx  = res_mask[0].nonzero(as_tuple=True)[0]
@@ -756,19 +640,16 @@ class RankFlow(LightningModule):
                 res_idx,
             )
             logits = result['logits'].detach()[0][res_idx]
-            attn = self._gather_res_attn(attn, res_idx)
-            x = {'input': tokens, 'logits': logits, 'representation': rep, 'attention': attn, 'res_idx': res_idx}
+            x = {'input': tokens, 'logits': logits, 'representation': rep, 'res_idx': res_idx}
         else:
             x = {
                 'input': tokens,
                 'logits': result['logits'].detach()[0],
                 'representation': torch.stack([v.detach() for _, v in sorted(result['representations'].items())], dim=2),
-                'attention': attn,
             }
         return x   
     
     def _ensure_vocab_buffers(self):
-        # Build once: 33-vocab → AA20 columns, and 33→20 index map
         if hasattr(self, "canon_idx33") and hasattr(self, "idx33_to_aa20"):
             return
         AA20 = "ACDEFGHIKLMNPQRSTVWY"
@@ -779,11 +660,9 @@ class RankFlow(LightningModule):
         self.register_buffer("canon_idx33", canon_idx33, persistent=False)
         self.register_buffer("idx33_to_aa20", id2aa20, persistent=False)
 
-
     def training_step(
         self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int
     ) -> torch.Tensor:
-        # Batch may include chain_ids (multichain) or not (single-chain legacy).
         if len(batch) == 9:
             assay_names, batch_tokens, chain_ids_list, coords, train_labels, _, msa_bank, higher_mutseqs_100, lower_mutseqs_100 = batch
         else:
@@ -825,7 +704,6 @@ class RankFlow(LightningModule):
         self.val_spearman.reset()
 
     def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> None:
-        # Batch may include chain_ids (multichain) or not (single-chain legacy).
         if len(batch) == 9:
             assay_names, batch_tokens, chain_ids_list, coords, _, valid_labels, msa_bank, _, _ = batch
         else:
@@ -842,7 +720,7 @@ class RankFlow(LightningModule):
                 with torch.no_grad():
                     self.state[f'{name}-structure'] = self._encode_structure(coord)
             x, y = self.state[f'{name}-valid']
-            res_idx_wt = x.get('res_idx', None) # Grab the invariant residue index
+            res_idx_wt = x.get('res_idx', None) 
             key_wt = f"{name}-wt_tokens"
             if key_wt not in self.state:
                 self.state[key_wt] = x_wt.clone().to(device)
@@ -878,21 +756,22 @@ class RankFlow(LightningModule):
                 if rows.numel() == 0:
                     continue  
 
-                rep_L, logits33_L, attn, last_rep = self._get_rep_logits(
+                rep_L, logits33_L, last_rep = self._get_rep_logits(
                     tok, chain_ids=chain_ids_master
                 )
 
                 rep_L = self.forward(
-                    {'input': tok, 'representation': rep_L, 'attention': attn},
+                    {'input': tok, 'representation': rep_L},
                     structure_repr=self.state[f'{name}-structure'],
                 ).detach()
+                
                 if self.use_residue_aligned:
-                    rep_L = rep_L[0]        # (L, d)
+                    rep_L = rep_L[0]        
                 else:
                     rep_L = rep_L[0, 1:-1, :]
 
                 aa20 = self._aa20_cols(device)
-                base_logits20 = logits33_L[:, aa20].index_select(0, rows)  # (K,20)
+                base_logits20 = logits33_L[:, aa20].index_select(0, rows)  
                 x0_embed      = last_rep
                 K = x0_embed.size(0)
 
@@ -904,7 +783,7 @@ class RankFlow(LightningModule):
                 m = torch.zeros(K, 1, device=device, dtype=x0_embed.dtype)
                 m[idx] = 1.0
 
-                rep_ctx = rep_L.unsqueeze(0)   # (1,L,d)
+                rep_ctx = rep_L.unsqueeze(0)   
 
                 mut20 = torch.tensor(mut20_list, device=device, dtype=torch.long)
                 refined_H = x0_embed.clone()
@@ -948,7 +827,6 @@ class RankFlow(LightningModule):
                 gamma = torch.sigmoid(self.delta_mix_logit)
                 pred_score = base_score + gamma * delta_score
 
-                # orientation-aware prediction
                 mu, sigma = self.assay_stats.get(name, (0.0, 1.0))
                 scores_hat_all.append(pred_score.item())
                 scores_true_all.append((float(sample['score']) - mu) / (sigma + 1e-8))
@@ -964,8 +842,6 @@ class RankFlow(LightningModule):
             torch.cuda.empty_cache()
     
     def on_validation_epoch_end(self) -> None:
-        "Lightning hook that is called when a validation epoch ends."
-
         self.log("val/spearman", self.val_spearman.compute(), sync_dist=True, prog_bar=True)
 
         spearman = self.val_spearman.compute() 
@@ -975,7 +851,6 @@ class RankFlow(LightningModule):
 
     def setup(self, stage: str) -> None:
         if self.hparams.compile and stage == "fit":
-            # compile the actual model that does the work
             self.emb_flow_head.net = torch.compile(self.emb_flow_head.net)
 
     def configure_optimizers(self) -> Dict[str, Any]:
@@ -1001,28 +876,28 @@ class RankFlow(LightningModule):
         mask_idx = self.alphabet.mask_idx
 
         hat, tru = [], []
-        for item in y[:len(y)]:  # small slice is fine
+        for item in y[:len(y)]:  
             tok = wt_tokens.clone()
             rows, wt20, mut20 = [], [], []
-            for (pos1, wt33, mut33) in item['mutants']:     # pos1 is 1-based
+            for (pos1, wt33, mut33) in item['mutants']:     
                 p = int(pos1)
                 tok[0, p] = mask_idx
                 if self.use_residue_aligned:
                     res_mask_tok = self._build_res_mask(tok)
                     row = int(res_mask_tok[0, :p].sum().item())
                 else:
-                    row = p - 1                             # row index in (L,·)
+                    row = p - 1                             
                 rows.append(row)
                 wt20.append(int(self.idx33_to_aa20[int(wt33)]))
                 mut20.append(int(self.idx33_to_aa20[int(mut33)]))
             if not rows: 
                 continue
 
-            _, logits33_L, _, _ = self._get_rep_logits(tok, chain_ids=chain_ids)
+            _, logits33_L, _ = self._get_rep_logits(tok, chain_ids=chain_ids)
             aa20 = self._aa20_cols(device)
             base_lp = F.log_softmax(logits33_L[:, aa20].index_select(
                 0, torch.tensor(rows, device=device)
-            ), dim=-1)                                      # (K,20)
+            ), dim=-1)                                      
 
             vals = []
             for r, (w, m) in enumerate(zip(wt20, mut20)):
@@ -1037,7 +912,6 @@ class RankFlow(LightningModule):
         if len(hat) < 3:
             return 1
 
-        # Spearman sign (torch-only)
         hx = torch.tensor(hat, dtype=torch.float32, device=device)
         hy = torch.tensor(tru, dtype=torch.float32, device=device)
         rx = torch.argsort(torch.argsort(hx)).float()
@@ -1046,4 +920,16 @@ class RankFlow(LightningModule):
         ry = (ry - ry.mean()) / (ry.std(unbiased=False) + 1e-8)
         rho = float((rx * ry).mean().item())
         return 1 if rho >= 0 else -1
+        
+    def on_test_epoch_start(self):
+        # Reset the metric just like in validation
+        self.val_spearman.reset()
 
+    def test_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> None:
+        # Reuse your existing validation logic directly
+        self.validation_step(batch, batch_idx)
+
+    def on_test_epoch_end(self) -> None:
+        # Log the metric under a 'test/' namespace instead of 'val/'
+        spearman = self.val_spearman.compute()
+        self.log("test/spearman", spearman, sync_dist=True, prog_bar=True)

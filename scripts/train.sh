@@ -16,6 +16,7 @@ set -euo pipefail
 source /pub/absara/projects/antibodies/RFlowAntibody/.venv/bin/activate
 export PYTHONPATH=""
 export PYTHONPATH="/pub/absara/models/ProteinMPNN:${PYTHONPATH:-}"
+export TORCH_HOME="/dfs6b/pub/absara/.cache/torch"
 
 # (Optional) ensure GPU 0 is used
 export CUDA_VISIBLE_DEVICES=0
@@ -54,4 +55,5 @@ python /pub/absara/projects/antibodies/RFlowAntibody/src/train.py \
   trainer.devices=1 \
   trainer.precision=bf16 \
   data=antibody_library \
-  data.library_pdb_map="$YAML_MAP"
+  data.library_pdb_map="$YAML_MAP" \
+  data.master_csv="/pub/absara/datasets/ASD/csv/non_binary_affinity_unique/asd_full_align_000196.csv"

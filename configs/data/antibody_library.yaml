@@ -55,6 +55,6 @@ filter_wild_type_length: True
 min_variants_per_library: 8
 
 # DataLoader settings
-batch_size: 8
+batch_size: 64
 num_workers: 0
 pin_memory: False
